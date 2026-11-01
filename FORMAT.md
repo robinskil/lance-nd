@@ -2,17 +2,18 @@
 
 Version 1
 
-This document specifies how a Lance dataset stores N-dimensional datasets.
+This document specifies how a Lance table stores nd record batches.
 The storage is the `nd_arrow.array` encoding of
 [nd-arrow-array](https://github.com/robinskil/nd-arrow-array/blob/main/FORMAT.md).
 
 ## 1. Overview
 
-A table is a Lance dataset. Each row of the table is one nd record batch:
-a set of variables on one grid, like an xarray `Dataset`. A row can hold a
-whole dataset or a chunk of a dataset. The format does not separate the two.
+A table is a Lance table. Each row of the table is one nd record batch:
+a set of named nd arrow arrays on one grid, plus optional global attributes.
+A row can hold a complete nd record batch or a chunk of a larger one.
+The format does not separate the two.
 
-Rows can have different variables and different grids.
+Rows can have different arrays and different grids.
 Version 1 has no indexes.
 
 ## 2. Columns
@@ -21,17 +22,17 @@ The table schema is an nd-arrow encoded schema (nd-arrow format, section 7):
 
 | Column | Type | Nullable |
 |---|---|---|
-| one column per variable | `nd_arrow.array` | yes |
+| one column per array name | `nd_arrow.array` | yes |
 | `__global_attrs__` | `nd_arrow.global_attributes` | yes |
 
 Rules:
 
-1. The variable columns hold the union of the variables of all rows.
-   One variable has one value type in a table.
-2. A null variable in a row means that the row does not have that variable.
-   A reader leaves the variable out of the row. It does not decode it as a
+1. The array columns hold the union of the array names of all rows.
+   One array name has one value type in a table.
+2. A null in an array column means that the row does not have that array.
+   A reader leaves the array out of the row. It does not decode it as a
    rank-0 null scalar.
-3. The children of a null variable row are valid: empty `values`, `dim_names`
+3. The children of a null array row are valid: empty `values`, `dim_names`
    and `dim_sizes` lists. Lance rejects nulls in non-nullable fields.
 4. The `__global_attrs__` column holds the global attributes of each row.
    A table without global attributes does not have this column.
@@ -40,17 +41,17 @@ Rules:
    nullable. A null row has no global attributes.
 6. The column order has no meaning.
 7. The table schema metadata holds the column defaults, see section 6.
-   Other keys have no meaning. The field metadata of a variable comes from
-   the first row with that variable.
+   Other keys have no meaning. The field metadata of an array column comes
+   from the first row with that array.
 
 ## 3. Grid
 
 The format does not store the grid of a row. A reader infers it from the
-variables of the row, as in the nd-arrow format.
+arrays of the row, as in the nd-arrow format.
 
 ## 4. Schema evolution
 
-A write can add variables, attribute keys and global attributes.
+A write can add array names, attribute keys and global attributes.
 The writer adds the new fields as all-null fields first, then appends the rows.
 Older rows read the new fields as null, so as absent.
 
@@ -59,9 +60,9 @@ A writer must create the table with file version 2.2 or later.
 
 ## 5. Identity of rows
 
-The format has no reserved columns for dataset names or chunk positions.
+The format has no reserved columns for names or chunk positions.
 Put them in the global attributes, for example `id` or `chunk_offset`.
-A filter on `__global_attrs__.id` then selects the rows of one dataset.
+A filter on `__global_attrs__.id` then selects the rows with that id.
 
 ## 6. Column encoding
 
@@ -86,5 +87,5 @@ The column defaults are table schema metadata keys. Each key is the prefix
 gives the defaults to each column that it adds. Options for one column
 override the defaults. A column keeps its encoding when the defaults change.
 
-A reader removes the `lance-encoding:` keys from the variables and
-attributes that it returns.
+A reader removes the `lance-encoding:` keys from the arrays and attributes
+that it returns.

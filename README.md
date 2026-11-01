@@ -2,11 +2,11 @@
   <img src="assets/logo-wordmark.svg" alt="lance-nd" width="420">
 </p>
 
-<h3 align="center">N-dimensional datasets, stored in Lance</h3>
+<h3 align="center">N-dimensional Arrow arrays, stored in Lance</h3>
 
 <p align="center">
-  Stream xarray-like datasets into a Lance table and read them back,<br>
-  one row per dataset or chunk, with projection, filters and schema evolution.
+  Stream nd record batches into a Lance table and read them back,<br>
+  one nd record batch per row, with projection, filters and schema evolution.
 </p>
 
 <p align="center">
@@ -30,23 +30,24 @@
 
 ## Overview
 
-lance-nd stores N-dimensional datasets, like xarray `Dataset`s or netCDF
-files, in a [Lance](https://lancedb.github.io/lance/) table. It has two layers:
+lance-nd is a general way to store N-dimensional array data in a
+[Lance](https://lancedb.github.io/lance/) table. It has two layers:
 
 | Layer | What it does |
 |---|---|
-| [nd-arrow-array](https://github.com/robinskil/nd-arrow-array) | Encodes N-dimensional arrays and datasets as plain Apache Arrow data. |
-| lance-nd | Stores that Arrow data in Lance, one row per dataset or chunk. |
+| [nd-arrow-array](https://github.com/robinskil/nd-arrow-array) | Encodes nd arrow arrays and nd record batches as plain Apache Arrow data. |
+| lance-nd | Stores that Arrow data in Lance, one nd record batch per row. |
 
 The Lance table schema **is** the nd-arrow encoding. lance-nd adds no extra
 columns and no private layout, so any Arrow or Lance reader can read the data.
 
 ## The nd-arrow encoding
 
-### One array per row
+### nd arrow arrays
 
-An nd column is an Arrow extension type, `nd_arrow.array`, over a struct.
-Each row of the column holds one complete N-dimensional array:
+An nd arrow array is one N-dimensional array. As an Arrow column, it is the
+extension type `nd_arrow.array` over a struct, and each row holds one complete
+nd arrow array:
 
 ```text
 Struct {
@@ -57,96 +58,98 @@ Struct {
 }
 ```
 
-For example, a `(time=2, lat=3)` array of `Float64` with `units = "K"`:
+For example, an `(x=2, y=3)` array of `Float64` with `units = "K"`:
 
 ```text
 values:    [0.0, 0.1, 0.2, 1.0, 1.1, 1.2]
-dim_names: ["time", "lat"]
+dim_names: ["x", "y"]
 dim_sizes: [2, 3]
 attrs:     { units: "K" }
 ```
 
-The element at `(time=1, lat=2)` is at flat position `1 * 3 + 2 = 5`, so its
-value is `1.2`.
+The element at `(x=1, y=2)` is at flat position `1 * 3 + 2 = 5`, so its value
+is `1.2`.
 
 Rules:
 
 - The rows of one column can have different shapes and dimensions.
-- A row with no dimensions is a scalar with one value.
+- An nd arrow array with no dimensions is a scalar with one value.
 - Nulls in the `values` items mark missing elements. The format has no fill
   value and no separate mask.
 - `attrs` has one child field per attribute key. A null child means that the
-  row does not have that key. One key has one type in a column.
+  array does not have that key. One key has one type in a column.
 
-### One dataset per row
+### nd record batches
 
-A dataset is several arrays on one shared grid. An Arrow record batch of nd
-columns stores datasets, one per row:
+An nd record batch is a set of named nd arrow arrays on one shared grid, plus
+optional global attributes. As Arrow data, it is a record batch of nd columns:
 
-- Each nd column is one variable, for example `time`, `lat` or `sst`.
-- The variables of one row broadcast onto one grid. A variable can use a subset
-  of the grid dimensions: a coordinate uses one, and a scalar uses none.
-- The format does not store the grid. A reader infers it from the variables.
-- Global attributes of the dataset, like xarray `Dataset.attrs`, are in one
-  extra struct column, `__global_attrs__`.
+- Each nd column holds one named nd arrow array, for example `x`, `y` or
+  `temperature`.
+- The arrays broadcast onto one grid. An array can use a subset of the grid
+  dimensions: a coordinate array uses one, and a scalar uses none.
+- The format does not store the grid. A reader infers it from the arrays.
+- Global attributes describe the whole nd record batch. They are in one extra
+  struct column, `__global_attrs__`.
 
-In Rust, one such row is an `NdRecordBatch`.
+In Rust, these are `NdArrowArray` and `NdRecordBatch` from
+[nd-arrow-array](https://github.com/robinskil/nd-arrow-array).
 
 ## The lance-nd table
 
-A lance-nd table is a Lance dataset. Each table row is one `NdRecordBatch`:
-a whole dataset, or one chunk of a dataset.
+A lance-nd table is a Lance table. Each table row is one nd record batch:
+a complete one, or one chunk of a larger one.
 
 | Column | Type | Nullable |
 |---|---|---|
-| one column per variable | `nd_arrow.array` | yes |
+| one column per array name | `nd_arrow.array` | yes |
 | `__global_attrs__` | `nd_arrow.global_attributes` | yes |
 
-For example, a table with two sea surface files and one station file:
+For example, a table with three nd record batches:
 
-| Row | `time` | `lat` | `sst` | `pressure` | `__global_attrs__` |
+| Row | `x` | `y` | `temperature` | `pressure` | `__global_attrs__` |
 |---|---|---|---|---|---|
-| 0 | `(time=3)` | `(lat=4)` | `(time=3, lat=4)` | absent | `{id: "sst_a.nc"}` |
-| 1 | absent | absent | absent | `(station=3)` | `{id: "stations.nc"}` |
-| 2 | `(time=2)` | `(lat=4)` | `(time=2, lat=4)` | absent | `{id: "sst_b.nc"}` |
+| 0 | `(x=3)` | `(y=4)` | `(x=3, y=4)` | absent | `{id: "a"}` |
+| 1 | absent | absent | absent | `(station=3)` | `{id: "b"}` |
+| 2 | `(x=2)` | `(y=4)` | `(x=2, y=4)` | absent | `{id: "c"}` |
 
-### Variables
+### Array columns
 
-- The variable columns are the union of the variables of all rows.
-- A null variable means that the row does not have that variable. A reader
-  leaves it out of the row.
-- One variable has one value type in a table. A write that changes the type
+- The table has one column for each array name in any row.
+- A null in a row means that the nd record batch of that row does not have
+  that array. A reader leaves it out of the row.
+- One array name has one value type in a table. A write that changes the type
   fails.
 
 ### Schema evolution
 
-A write can bring new variables, new attribute keys and new global attributes.
-lance-nd adds them to the table schema first, then appends the rows. Older rows
-read the new variables as absent.
+A write can bring new array names, new attribute keys and new global
+attributes. lance-nd adds them to the table schema first, then appends the
+rows. Older rows read the new arrays as absent.
 
 Lance can add nested fields only with file version 2.2 or later, so lance-nd
 creates tables with file version 2.2.
 
 ### Rows and chunks
 
-The format does not separate a dataset from a chunk, and it has no reserved
-columns for names or positions. Put them in the global attributes, for example
-`id` or `chunk_offset`, then filter on them:
+The format does not separate a complete nd record batch from a chunk, and it
+has no reserved columns for names or positions. Put them in the global
+attributes, for example `id` or `chunk_offset`, then filter on them:
 
 ```sql
-__global_attrs__.id = 'sst_a.nc'
+__global_attrs__.id = 'a'
 ```
 
 ### Column encoding
 
 Each column can have its own Lance encoding: compression, compression level,
 byte stream split, run-length encoding and structural encoding. The table
-stores default options, and each new variable gets them. You can also set
-options for named variables.
+stores default options, and each new column gets them. You can also set
+options for named columns.
 
 ## Usage
 
-Write a stream of `NdRecordBatch` rows, then read a projection back as a stream:
+Write a stream of nd record batches, then read a projection back as a stream:
 
 ```rust
 use futures::{StreamExt, stream};
@@ -159,14 +162,14 @@ let options = WriteOptions {
     ..WriteOptions::default()
 };
 
-// `datasets` is an iterator of nd_arrow_array::NdRecordBatch.
-let rows = stream::iter(datasets.map(Ok));
-let table = write("data/ocean.lance", rows, &options).await?;
+// `batches` is an iterator of nd_arrow_array::NdRecordBatch.
+let rows = stream::iter(batches.map(Ok));
+let table = write("data/arrays.lance", rows, &options).await?;
 
-// Read two variables of one file. Each item is one NdRecordBatch.
+// Read two arrays of one row. Each item is one NdRecordBatch.
 let mut rows = scan(&table)
-    .project(&["sst", "lat"])
-    .filter("__global_attrs__.id = 'sst_a.nc'")
+    .project(&["temperature", "x"])
+    .filter("__global_attrs__.id = 'a'")
     .try_into_stream()
     .await?;
 while let Some(batch) = rows.next().await {
@@ -179,10 +182,10 @@ The main functions:
 
 | Function | Purpose |
 |---|---|
-| `write(uri, rows, &options)` | Create, append to or overwrite a table from a stream of rows. |
-| `append(&mut dataset, rows, &options)` | Append a stream of rows to an open table. |
-| `scan(&dataset)` | Read rows as a stream, with `project`, `filter` and `limit`. |
-| `variables(&dataset)` | List the variables of the table. |
+| `write(uri, rows, &options)` | Create, append to or overwrite a table from a stream of nd record batches. |
+| `append(&mut table, rows, &options)` | Append a stream of nd record batches to an open table. |
+| `scan(&table)` | Read nd record batches as a stream, with `project`, `filter` and `limit`. |
+| `variables(&table)` | List the array columns of the table. |
 | `column_defaults` and `set_column_defaults` | Read and change the encoding defaults for new columns. |
 
 Rows can be large, so a scan reads Lance batches of at most 256 rows or about

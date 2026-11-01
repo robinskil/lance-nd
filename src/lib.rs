@@ -1,9 +1,9 @@
-//! N-dimensional datasets in Lance.
+//! N-dimensional Arrow arrays in Lance.
 //!
 //! A table is a Lance dataset whose schema is the nd-arrow encoding: one
-//! `nd_arrow.array` column per variable and an optional `__global_attrs__`
+//! `nd_arrow.array` column per array name and an optional `__global_attrs__`
 //! column. Each row is one [`NdRecordBatch`](nd_arrow_array::NdRecordBatch),
-//! like an xarray `Dataset` or a chunk of one.
+//! a complete one or a chunk of a larger one.
 //!
 //! - [`write()`] and [`append()`]: write a stream of nd record batches.
 //! - [`scan()`]: read a stream of nd record batches, with a projection.

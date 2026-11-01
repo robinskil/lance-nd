@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/logo-wordmark.svg" alt="lance-nd" width="420">
+</p>
+
 # lance-nd
 
 N-dimensional datasets in [Lance](https://lancedb.github.io/lance/).

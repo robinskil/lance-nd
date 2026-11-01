@@ -10,6 +10,7 @@ license = "Apache-2.0"
 arrow = { version = "58", default-features = false }
 futures = "0.3"
 lance = { version = "11", default-features = false }
+lance-core = "11"
 lance-file = "11"
 nd-arrow-array = { git = "https://github.com/robinskil/nd-arrow-array" }
 thiserror = "2"

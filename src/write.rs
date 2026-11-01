@@ -167,7 +167,15 @@ async fn append_batch(dataset: &mut Dataset, batch: RecordBatch) -> Result<()> {
             .add_columns(NewColumnTransform::AllNulls(schema), None, None)
             .await?;
     }
-    let schema = Arc::new(Schema::from(dataset.schema()));
+    // Only the columns of the batch: Lance reads the absent columns as null.
+    let table = Schema::from(dataset.schema());
+    let present: Vec<_> = table
+        .fields()
+        .iter()
+        .filter(|field| batch.schema().column_with_name(field.name()).is_some())
+        .cloned()
+        .collect();
+    let schema = Arc::new(Schema::new_with_metadata(present, table.metadata().clone()));
     let batch = conform_batch(&batch, &schema)?;
     dataset.append(reader(batch, schema), None).await?;
     Ok(())

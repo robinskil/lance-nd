@@ -12,7 +12,10 @@ variable and an optional `__global_attrs__` column.
 
 - `write(uri, rows, &options)`: write a stream of nd record batches.
 - `append(&mut dataset, rows, &options)`: append a stream to an open table.
-- `scan(&dataset)`: read a stream of nd record batches.
+- `scan(&dataset)`: read a stream of nd record batches. Set `project`,
+  `filter` and `limit` to select data. Set `batch_size` (default 256 rows),
+  `batch_size_bytes` (default 32 MiB), `batch_readahead` and
+  `decode_parallelism` to tune the read.
 - `variables(&dataset)`: list the variables of the table.
 - `column_defaults(&dataset)` and `set_column_defaults(&mut dataset, &options)`:
   read and change the encoding defaults for new columns.
@@ -64,6 +67,15 @@ while let Some(batch) = rows.next().await {
     let batch = batch?;
     println!("{:?}", batch.target());
 }
+```
+
+## Scale test
+
+`tests/scale.rs` writes 10K datasets with 20 of 2,048 variables each, then
+reads 20 variables from all rows. Run it in release mode:
+
+```sh
+cargo test --release --test scale -- --ignored --nocapture
 ```
 
 ## Status

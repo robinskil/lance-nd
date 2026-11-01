@@ -2862,6 +2862,7 @@ dependencies = [
  "arrow",
  "futures",
  "lance",
+ "lance-core",
  "lance-file",
  "nd-arrow-array",
  "tempfile",

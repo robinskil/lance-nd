@@ -1,0 +1,19 @@
+[package]
+name = "lance-nd"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.91.0"
+description = "N-dimensional datasets stored in Lance, one dataset or chunk per row"
+license = "Apache-2.0"
+
+[dependencies]
+arrow = { version = "58", default-features = false }
+futures = "0.3"
+lance = { version = "11", default-features = false }
+lance-file = "11"
+nd-arrow-array = { git = "https://github.com/robinskil/nd-arrow-array" }
+thiserror = "2"
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

@@ -4,6 +4,7 @@ use arrow::datatypes::{Field, Schema};
 use futures::stream::{self, BoxStream};
 use futures::{StreamExt, TryStreamExt};
 use lance::Dataset;
+use lance::table::format::Fragment;
 use lance_core::utils::tokio::{get_num_compute_intensive_cpus, spawn_cpu};
 use nd_arrow_array::NdRecordBatch;
 use nd_arrow_array::extension::GLOBAL_ATTRIBUTES_FIELD;
@@ -27,6 +28,7 @@ pub fn scan(dataset: &Dataset) -> NdScanner<'_> {
         dataset,
         projection: None,
         filter: None,
+        fragments: None,
         limit: None,
         batch_size: DEFAULT_BATCH_SIZE,
         batch_size_bytes: DEFAULT_BATCH_SIZE_BYTES,
@@ -49,6 +51,7 @@ pub struct NdScanner<'a> {
     dataset: &'a Dataset,
     projection: Option<Vec<String>>,
     filter: Option<String>,
+    fragments: Option<Vec<Fragment>>,
     limit: Option<i64>,
     batch_size: usize,
     batch_size_bytes: u64,
@@ -67,6 +70,12 @@ impl NdScanner<'_> {
     /// Read only the rows that match a Lance SQL filter.
     pub fn filter(mut self, filter: impl Into<String>) -> Self {
         self.filter = Some(filter.into());
+        self
+    }
+
+    /// Read only the rows of these fragments, in the order given.
+    pub fn fragments(mut self, fragments: Vec<Fragment>) -> Self {
+        self.fragments = Some(fragments);
         self
     }
 
@@ -125,6 +134,9 @@ impl NdScanner<'_> {
         }
         if let Some(filter) = &self.filter {
             scanner.filter(filter)?;
+        }
+        if let Some(fragments) = &self.fragments {
+            scanner.with_fragments(fragments.clone());
         }
         if self.limit.is_some() {
             scanner.limit(self.limit, None)?;

@@ -19,7 +19,7 @@ use crate::schema::{conform_batch, merge_schemas, missing_fields};
 
 /// Lance file version for new tables. Version 2.2 can add nested fields,
 /// which new attribute keys need.
-const FILE_VERSION: LanceFileVersion = LanceFileVersion::V2_2;
+pub(crate) const FILE_VERSION: LanceFileVersion = LanceFileVersion::V2_2;
 
 /// Options for [`write()`] and [`append()`].
 #[derive(Debug, Clone)]
@@ -113,7 +113,7 @@ pub async fn append(
 }
 
 /// The stored column defaults. Fails when `options` has other defaults.
-fn table_defaults(dataset: &Dataset, options: &WriteOptions) -> Result<ColumnOptions> {
+pub(crate) fn table_defaults(dataset: &Dataset, options: &WriteOptions) -> Result<ColumnOptions> {
     let stored = column_defaults(dataset)?;
     match &options.column_defaults {
         Some(defaults) if *defaults != stored => Err(Error::InvalidArgument(
@@ -126,7 +126,7 @@ fn table_defaults(dataset: &Dataset, options: &WriteOptions) -> Result<ColumnOpt
 
 /// Encode one group with the encoding metadata of its columns.
 /// The schema metadata holds the defaults, which a new table stores.
-fn encode_group(
+pub(crate) fn encode_group(
     group: &[NdRecordBatch],
     defaults: &ColumnOptions,
     options: &WriteOptions,
@@ -138,7 +138,7 @@ fn encode_group(
 }
 
 /// The next rows for one commit, or `None` at the end of the stream.
-async fn next_group(
+pub(crate) async fn next_group(
     rows: &mut (impl Stream<Item = Result<NdRecordBatch>> + Unpin),
     options: &WriteOptions,
 ) -> Result<Option<Vec<NdRecordBatch>>> {

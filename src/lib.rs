@@ -6,6 +6,7 @@
 //! a complete one or a chunk of a larger one.
 //!
 //! - [`write()`] and [`append()`]: write a stream of nd record batches.
+//! - [`NdWriter`]: write in several calls and commit once.
 //! - [`scan()`]: read a stream of nd record batches, with a projection.
 //! - [`ColumnOptions`]: Lance encoding options, like the compression, per column.
 //!
@@ -19,6 +20,7 @@ pub mod options;
 pub mod scan;
 pub mod schema;
 pub mod write;
+pub mod writer;
 
 pub use error::{Error, Result};
 pub use lance::dataset::WriteMode;
@@ -28,3 +30,4 @@ pub use options::{
 };
 pub use scan::{NdScanner, scan, variables};
 pub use write::{WriteOptions, append, write};
+pub use writer::NdWriter;

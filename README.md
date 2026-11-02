@@ -23,6 +23,7 @@
   <a href="#the-nd-arrow-encoding">nd-arrow encoding</a> ·
   <a href="#the-lance-nd-table">lance-nd table</a> ·
   <a href="#usage">Usage</a> ·
+  <a href="#python">Python</a> ·
   <a href="FORMAT.md">Specification</a>
 </p>
 
@@ -184,6 +185,7 @@ The main functions:
 |---|---|
 | `write(uri, rows, &options)` | Create, append to or overwrite a table from a stream of nd record batches. |
 | `append(&mut table, rows, &options)` | Append a stream of nd record batches to an open table. |
+| `NdWriter::create` and `NdWriter::append` | Write nd record batches in several calls, then commit all of them in one version with `finish`. |
 | `scan(&table)` | Read nd record batches as a stream, with `project`, `filter` and `limit`. |
 | `variables(&table)` | List the array columns of the table. |
 | `column_defaults` and `set_column_defaults` | Read and change the encoding defaults for new columns. |
@@ -191,6 +193,22 @@ The main functions:
 Rows can be large, so a scan reads Lance batches of at most 256 rows or about
 32 MiB, and it decodes them in parallel. `batch_size`, `batch_size_bytes`,
 `batch_readahead` and `decode_parallelism` change these limits.
+
+## Python
+
+The `lance_nd` Python package encodes xarray datasets and writes them to a
+lance-nd table. It commits all datasets of one writer in one version:
+
+```python
+import xarray as xr
+import lance_nd
+
+with lance_nd.create("data/arrays.lance") as writer:
+    writer.write(xr.open_dataset("obs.nc"))
+```
+
+See [python/README.md](python/README.md) for installation and the encoding
+rules.
 
 ## Status
 

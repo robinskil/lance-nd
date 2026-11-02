@@ -1,0 +1,19 @@
+[build-system]
+requires = ["maturin>=1.7,<2"]
+build-backend = "maturin"
+
+[project]
+name = "lance_nd"
+version = "0.1.0"
+description = "Store xarray datasets as N-dimensional Arrow arrays in Lance"
+license = { text = "Apache-2.0" }
+requires-python = ">=3.10"
+dependencies = ["numpy", "pyarrow", "xarray"]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[tool.maturin]
+module-name = "lance_nd._lance_nd"
+python-source = "."
+features = ["pyo3/extension-module"]

@@ -1,12 +1,14 @@
 """Create, append to and open lance-nd tables."""
 
 from collections.abc import Sequence
+from types import TracebackType
 
 import pyarrow as pa
 import xarray as xr
 
 from lance_nd import _lance_nd
 from lance_nd._encode import encode, encode_chunks
+from lance_nd._typing import ColumnOptions, Mode, OnDrop
 
 Table = _lance_nd.Table
 
@@ -29,7 +31,7 @@ class Writer:
         self,
         data: xr.Dataset | Sequence[xr.Dataset] | pa.RecordBatch,
         chunks: Sequence[str] | None = None,
-        on_drop: str = "warn",
+        on_drop: OnDrop = "warn",
     ) -> None:
         """Write a dataset, a list of datasets or an nd-arrow record batch.
 
@@ -74,7 +76,12 @@ class Writer:
     def __enter__(self) -> "Writer":
         return self
 
-    def __exit__(self, exc_type, exc, traceback) -> None:
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
         # A finish() or abort() inside the block already closed the writer.
         if self._closed:
             return
@@ -86,15 +93,15 @@ class Writer:
 
 def create(
     uri: str,
-    mode: str = "create",
-    column_defaults: dict | None = None,
-    column_options: dict | None = None,
+    mode: Mode = "create",
+    column_defaults: ColumnOptions | None = None,
+    column_options: dict[str, ColumnOptions] | None = None,
 ) -> Writer:
     """A writer for a new table. ``mode`` is "create" or "overwrite"."""
     return Writer(_lance_nd.Writer.create(uri, mode, column_defaults, column_options))
 
 
-def append(uri: str, column_options: dict | None = None) -> Writer:
+def append(uri: str, column_options: dict[str, ColumnOptions] | None = None) -> Writer:
     """A writer that appends to an existing table."""
     return Writer(_lance_nd.Writer.append(uri, column_options))
 

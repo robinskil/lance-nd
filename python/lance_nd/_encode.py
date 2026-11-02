@@ -2,11 +2,14 @@
 
 import itertools
 import warnings
-from collections.abc import Iterator, Sequence
+from collections.abc import Hashable, Iterator, Sequence
+from typing import Any
 
 import numpy as np
 import pyarrow as pa
 import xarray as xr
+
+from lance_nd._typing import OnDrop
 
 GLOBAL_ATTRS = "__global_attrs__"
 ND_ARRAY_METADATA = {
@@ -23,11 +26,14 @@ _DIM_SIZES = pa.list_(pa.field("item", pa.uint32(), nullable=False))
 _MAX_VALUES = 2**31 - 1
 _ON_DROP = ("ignore", "warn", "raise")
 
+# The values, dimension names, shape and attributes of one variable.
+_Variable = tuple[pa.Array, list[str], tuple[int, ...], dict[Hashable, Any]]
+
 
 def encode(
     datasets: xr.Dataset | Sequence[xr.Dataset],
     chunks: Sequence[str] | None = None,
-    on_drop: str = "warn",
+    on_drop: OnDrop = "warn",
 ) -> pa.RecordBatch:
     """Encode one dataset or a list of datasets, one row per dataset.
 
@@ -60,7 +66,7 @@ def encode(
 
 
 def encode_chunks(
-    ds: xr.Dataset, chunks: Sequence[str], on_drop: str = "warn"
+    ds: xr.Dataset, chunks: Sequence[str], on_drop: OnDrop = "warn"
 ) -> Iterator[pa.RecordBatch]:
     """Encode each dask chunk of ``ds`` over the ``chunks`` dimensions as one row.
 
@@ -73,7 +79,7 @@ def encode_chunks(
         yield encode(part)
 
 
-def _datasets(datasets) -> list[xr.Dataset]:
+def _datasets(datasets: xr.Dataset | Sequence[xr.Dataset]) -> list[xr.Dataset]:
     if isinstance(datasets, xr.Dataset):
         datasets = [datasets]
     datasets = list(datasets)
@@ -83,7 +89,7 @@ def _datasets(datasets) -> list[xr.Dataset]:
     return datasets
 
 
-def _chunk_datasets(ds: xr.Dataset, chunks: Sequence[str], on_drop: str) -> Iterator[xr.Dataset]:
+def _chunk_datasets(ds: xr.Dataset, chunks: Sequence[str], on_drop: OnDrop) -> Iterator[xr.Dataset]:
     """The chunks of ``ds`` in C order, each a lazy dataset of the kept variables."""
     if on_drop not in _ON_DROP:
         raise ValueError(f"on_drop must be one of {_ON_DROP}, not '{on_drop}'")
@@ -114,7 +120,7 @@ def _chunk_datasets(ds: xr.Dataset, chunks: Sequence[str], on_drop: str) -> Iter
         yield kept.isel(dict(zip(chunks, parts, strict=True)))
 
 
-def _dataset_row(ds: xr.Dataset) -> tuple[dict, dict]:
+def _dataset_row(ds: xr.Dataset) -> tuple[dict[str, _Variable], dict[Hashable, Any]]:
     """The encoded variables of one dataset, and its global attributes."""
     if "coordinates" in ds.attrs:
         raise ValueError("the dataset already has a 'coordinates' attribute")
@@ -174,7 +180,7 @@ def _values(name: str, var: xr.Variable) -> pa.Array:
     raise TypeError(f"variable '{name}' has the unsupported dtype {data.dtype}")
 
 
-def _column(name: str, rows: list) -> pa.StructArray:
+def _column(name: str, rows: list[_Variable | None]) -> pa.StructArray:
     """One nd column. A row is None when the dataset does not have the variable."""
     types = {row[0].type for row in rows if row is not None}
     if len(types) > 1:
@@ -210,7 +216,7 @@ def _column(name: str, rows: list) -> pa.StructArray:
     return pa.StructArray.from_arrays(arrays, fields=fields, mask=mask)
 
 
-def _attrs_struct(rows: list[dict], owner: str) -> pa.StructArray:
+def _attrs_struct(rows: list[dict[Hashable, Any]], owner: str) -> pa.StructArray:
     """A struct with one child per key. A row without the key has a null."""
     encoded = [{str(k): _attr(str(k), v) for k, v in row.items()} for row in rows]
     keys = list(dict.fromkeys(key for row in encoded for key in row))
@@ -226,7 +232,7 @@ def _attrs_struct(rows: list[dict], owner: str) -> pa.StructArray:
     return pa.StructArray.from_arrays(arrays, names=keys)
 
 
-def _attr(key: str, value) -> tuple[pa.DataType, object]:
+def _attr(key: str, value: Any) -> tuple[pa.DataType, Any]:
     """The Arrow type and the Python value of one attribute."""
     if isinstance(value, np.ndarray) and value.ndim == 0:
         value = value[()]
@@ -244,14 +250,14 @@ def _attr(key: str, value) -> tuple[pa.DataType, object]:
     return _scalar(key, value)
 
 
-def _scalar_list(key: str, items: list) -> tuple[pa.DataType, list]:
+def _scalar_list(key: str, items: list[tuple[pa.DataType, Any]]) -> tuple[pa.DataType, list[Any]]:
     types = {t for t, _ in items}
     if len(types) != 1:
         raise TypeError(f"attribute '{key}' must be a list of one scalar type")
     return pa.list_(types.pop()), [v for _, v in items]
 
 
-def _scalar(key: str, value) -> tuple[pa.DataType, object]:
+def _scalar(key: str, value: Any) -> tuple[pa.DataType, Any]:
     if isinstance(value, str):
         return pa.string(), value
     if isinstance(value, bytes):

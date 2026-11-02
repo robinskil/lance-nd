@@ -3,5 +3,18 @@
 from lance_nd._api import Table, Writer, append, create, open
 from lance_nd._encode import encode, encode_chunks
 from lance_nd._lance_nd import LanceNdError
+from lance_nd._typing import ColumnOptions, Mode, OnDrop
 
-__all__ = ["LanceNdError", "Table", "Writer", "append", "create", "encode", "encode_chunks", "open"]
+__all__ = [
+    "ColumnOptions",
+    "LanceNdError",
+    "Mode",
+    "OnDrop",
+    "Table",
+    "Writer",
+    "append",
+    "create",
+    "encode",
+    "encode_chunks",
+    "open",
+]

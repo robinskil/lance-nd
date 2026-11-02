@@ -11,9 +11,18 @@ requires-python = ">=3.10"
 dependencies = ["numpy", "pyarrow", "xarray"]
 
 [project.optional-dependencies]
-dev = ["pytest"]
+dev = ["mypy", "pytest"]
 
 [tool.maturin]
 module-name = "lance_nd._lance_nd"
 python-source = "."
 features = ["pyo3/extension-module"]
+
+[tool.mypy]
+files = ["lance_nd"]
+strict = true
+
+[[tool.mypy.overrides]]
+# pyarrow has no type information.
+module = ["pyarrow", "pyarrow.*"]
+ignore_missing_imports = true

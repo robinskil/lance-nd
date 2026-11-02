@@ -120,6 +120,20 @@ lance_nd.create(
 )
 ```
 
+### Type hints
+
+The package has type hints and a `py.typed` marker. The stub
+`_lance_nd.pyi` types the native classes. Use these types in your own
+annotations:
+
+| Type | Values |
+|---|---|
+| `lance_nd.ColumnOptions` | the option set of one column, a `TypedDict` |
+| `lance_nd.Mode` | `"create"`, `"overwrite"` |
+| `lance_nd.OnDrop` | `"warn"`, `"raise"`, `"ignore"` |
+
+Run `mypy` in `python/` to check the package in strict mode.
+
 ## Encoding rules
 
 | xarray | nd-arrow |

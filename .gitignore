@@ -30,3 +30,6 @@ __pycache__/
 *.pyd
 *.so
 .pytest_cache/
+
+# Superpowers design docs
+docs/superpowers/

@@ -8,6 +8,7 @@
 //! - [`write()`] and [`append()`]: write a stream of nd record batches.
 //! - [`NdWriter`]: write in several calls and commit once.
 //! - [`scan()`]: read a stream of nd record batches, with a projection.
+//! - [`stats`]: opt-in min and max values per variable and row, for pruning.
 //! - [`ColumnOptions`]: Lance encoding options, like the compression, per column.
 //!
 //! See `FORMAT.md` for the table layout.
@@ -19,6 +20,7 @@ pub mod error;
 pub mod options;
 pub mod scan;
 pub mod schema;
+pub mod stats;
 pub mod write;
 pub mod writer;
 

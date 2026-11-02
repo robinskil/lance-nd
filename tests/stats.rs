@@ -612,6 +612,9 @@ mod pruning {
         matches: Box<dyn Fn(&Data) -> bool>,
     }
 
+    /// A test of one value.
+    type Test<T> = Box<dyn Fn(&T) -> bool>;
+
     /// A filter on one variable. A row matches when one of its values matches.
     fn leaf<T: Clone + PartialOrd + 'static>(
         random: &mut Random,
@@ -623,7 +626,7 @@ mod pruning {
         let a = pick(random);
         let b = pick(random);
         let column = col(name);
-        let (expr, test): (Expr, Box<dyn Fn(&T) -> bool>) = match random.below(7) {
+        let (expr, test): (Expr, Test<T>) = match random.below(7) {
             0 => (column.eq(literal(&a)), Box::new(move |v| *v == a)),
             1 => (column.lt(literal(&a)), Box::new(move |v| *v < a)),
             2 => (column.lt_eq(literal(&a)), Box::new(move |v| *v <= a)),
@@ -639,7 +642,7 @@ mod pruning {
             ),
         };
         let matches = Box::new(move |data: &Data| {
-            get(data).is_some_and(|values| values.iter().flatten().any(|v| test(v)))
+            get(data).is_some_and(|values| values.iter().flatten().any(&test))
         });
         Filter { expr, matches }
     }

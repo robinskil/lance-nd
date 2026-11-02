@@ -6,7 +6,7 @@ import pyarrow as pa
 import xarray as xr
 
 from lance_nd import _lance_nd
-from lance_nd._encode import encode
+from lance_nd._encode import encode, encode_chunks
 
 Table = _lance_nd.Table
 
@@ -25,20 +25,36 @@ class Writer:
         #: The committed table after ``finish()``, else ``None``.
         self.table: Table | None = None
 
-    def write(self, data: xr.Dataset | Sequence[xr.Dataset] | pa.RecordBatch) -> None:
-        """Write a dataset, a list of datasets or an nd-arrow record batch."""
+    def write(
+        self,
+        data: xr.Dataset | Sequence[xr.Dataset] | pa.RecordBatch,
+        chunks: Sequence[str] | None = None,
+        on_drop: str = "warn",
+    ) -> None:
+        """Write a dataset, a list of datasets or an nd-arrow record batch.
+
+        With ``chunks``, each dask chunk of each dataset is one row. The
+        writer computes and writes one chunk at a time, see
+        :func:`lance_nd.encode_chunks`.
+        """
         if isinstance(data, pa.RecordBatch):
-            batch = data
+            if chunks is not None:
+                raise TypeError("chunks needs xarray datasets, not a pyarrow.RecordBatch")
+            self._native.write_batch(data)
         elif isinstance(data, xr.Dataset) or (
             isinstance(data, Sequence) and not isinstance(data, str | bytes)
         ):
-            batch = encode(data)
+            if chunks is None:
+                self._native.write_batch(encode(data))
+                return
+            for ds in [data] if isinstance(data, xr.Dataset) else data:
+                for batch in encode_chunks(ds, chunks, on_drop):
+                    self._native.write_batch(batch)
         else:
             raise TypeError(
                 "expected an xarray.Dataset, a list of them or a pyarrow.RecordBatch, "
                 f"not {type(data).__name__}"
             )
-        self._native.write_batch(batch)
 
     def finish(self) -> Table:
         """Commit all written datasets in one new table version."""

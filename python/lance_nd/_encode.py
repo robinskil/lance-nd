@@ -1,6 +1,8 @@
 """Encode xarray datasets as nd-arrow record batches."""
 
-from collections.abc import Sequence
+import itertools
+import warnings
+from collections.abc import Iterator, Sequence
 
 import numpy as np
 import pyarrow as pa
@@ -19,22 +21,26 @@ _DIM_NAMES = pa.list_(pa.field("item", pa.string(), nullable=False))
 _DIM_SIZES = pa.list_(pa.field("item", pa.uint32(), nullable=False))
 # Version 1 uses List with 32-bit offsets.
 _MAX_VALUES = 2**31 - 1
+_ON_DROP = ("ignore", "warn", "raise")
 
 
-def encode(datasets: xr.Dataset | Sequence[xr.Dataset]) -> pa.RecordBatch:
+def encode(
+    datasets: xr.Dataset | Sequence[xr.Dataset],
+    chunks: Sequence[str] | None = None,
+    on_drop: str = "warn",
+) -> pa.RecordBatch:
     """Encode one dataset or a list of datasets, one row per dataset.
 
     Each variable and coordinate is one ``nd_arrow.array`` column. A dataset
     that does not have a variable gets a null row in that column. The
     dataset attributes go into the ``__global_attrs__`` column.
-    """
-    if isinstance(datasets, xr.Dataset):
-        datasets = [datasets]
-    datasets = list(datasets)
-    for ds in datasets:
-        if not isinstance(ds, xr.Dataset):
-            raise TypeError(f"expected an xarray.Dataset, not {type(ds).__name__}")
 
+    With ``chunks``, each dask chunk over those dimensions is one row, see
+    :func:`encode_chunks`. This loads all chunks.
+    """
+    datasets = _datasets(datasets)
+    if chunks is not None:
+        datasets = [part for ds in datasets for part in _chunk_datasets(ds, chunks, on_drop)]
     rows = [_dataset_row(ds) for ds in datasets]
     names = list(dict.fromkeys(name for variables, _ in rows for name in variables))
     fields = []
@@ -51,6 +57,61 @@ def encode(datasets: xr.Dataset | Sequence[xr.Dataset]) -> pa.RecordBatch:
         )
         columns.append(column)
     return pa.RecordBatch.from_arrays(columns, schema=pa.schema(fields))
+
+
+def encode_chunks(
+    ds: xr.Dataset, chunks: Sequence[str], on_drop: str = "warn"
+) -> Iterator[pa.RecordBatch]:
+    """Encode each dask chunk of ``ds`` over the ``chunks`` dimensions as one row.
+
+    Yields one record batch per chunk and computes one chunk at a time.
+    A variable is kept when all its dimensions are chunk dimensions, or when
+    it has all chunk dimensions. ``on_drop`` is "warn", "raise" or "ignore"
+    for the other variables.
+    """
+    for part in _chunk_datasets(ds, chunks, on_drop):
+        yield encode(part)
+
+
+def _datasets(datasets) -> list[xr.Dataset]:
+    if isinstance(datasets, xr.Dataset):
+        datasets = [datasets]
+    datasets = list(datasets)
+    for ds in datasets:
+        if not isinstance(ds, xr.Dataset):
+            raise TypeError(f"expected an xarray.Dataset, not {type(ds).__name__}")
+    return datasets
+
+
+def _chunk_datasets(ds: xr.Dataset, chunks: Sequence[str], on_drop: str) -> Iterator[xr.Dataset]:
+    """The chunks of ``ds`` in C order, each a lazy dataset of the kept variables."""
+    if on_drop not in _ON_DROP:
+        raise ValueError(f"on_drop must be one of {_ON_DROP}, not '{on_drop}'")
+    chunks = [str(name) for name in chunks]
+    sizes = ds.chunks
+    for name in chunks:
+        if name not in sizes:
+            raise ValueError(f"'{name}' is not a dask chunked dimension of the dataset")
+    grid = set(chunks)
+    dropped = sorted(
+        str(name)
+        for name, var in ds.variables.items()
+        if not (set(var.dims) <= grid or set(var.dims) >= grid)
+    )
+    if len(dropped) == len(ds.variables):
+        raise ValueError(f"no variable fits the chunk dimensions {chunks}")
+    if dropped and on_drop != "ignore":
+        message = f"variables outside the chunk dimensions {chunks}: {', '.join(dropped)}"
+        if on_drop == "raise":
+            raise ValueError(message)
+        warnings.warn(message, UserWarning, stacklevel=3)
+    kept = ds.drop_vars(dropped)
+    slices = []
+    for name in chunks:
+        bounds = np.cumsum((0, *sizes[name]))
+        slices.append([slice(int(a), int(b)) for a, b in itertools.pairwise(bounds)])
+    for parts in itertools.product(*slices):
+        yield kept.isel(dict(zip(chunks, parts, strict=True)))
 
 
 def _dataset_row(ds: xr.Dataset) -> tuple[dict, dict]:

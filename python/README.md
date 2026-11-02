@@ -46,11 +46,12 @@ table.version, table.count_rows(), table.variables()
 
 | Function | Purpose |
 |---|---|
-| `encode(datasets)` | Encode one dataset or a list of datasets. Each dataset is one row. |
+| `encode(datasets, chunks=None)` | Encode one dataset or a list of datasets. Each dataset is one row, or each dask chunk with `chunks`. |
+| `encode_chunks(ds, chunks)` | Encode one dask chunk at a time, one record batch per chunk. |
 | `create(uri, mode="create")` | A writer for a new table. `mode="overwrite"` replaces the table at `finish()`. |
 | `append(uri)` | A writer for an existing table. |
 | `open(uri)` | The table at its current version. |
-| `Writer.write(data)` | Write datasets as data files, without a commit. |
+| `Writer.write(data, chunks=None)` | Write datasets as data files, without a commit. With `chunks`, one chunk at a time. |
 | `Writer.finish()` | Commit all written datasets in one version. |
 | `Writer.abort()` | Drop all written datasets. |
 
@@ -66,6 +67,37 @@ Rules:
 - If another writer adds variables to the table before your `finish()`, and
   your writer also adds variables, `finish()` raises an error.
 - Errors from Rust raise `lance_nd.LanceNdError`.
+
+### Chunked datasets
+
+A dataset that you open with dask chunks can give one row per chunk. Each
+row is a complete dataset, so a reader can load one chunk at a time.
+
+```python
+ds = xr.open_dataset("ocean.nc", chunks={"time": 24, "depth": 100})
+
+with lance_nd.create("ocean.lance") as writer:
+    writer.write(ds, chunks=["time", "depth"], on_drop="warn")
+
+for batch in lance_nd.encode_chunks(ds, chunks=["time", "depth"]):
+    ...                                  # one record batch per chunk
+```
+
+- `chunks` names the chunk dimensions. Each row is one dask chunk over
+  these dimensions, in C order with the first name as the outermost.
+- A variable is kept when all its dimensions are chunk dimensions, for
+  example `(time)`, `(time, depth)` or a scalar. A variable is also kept
+  when it has all chunk dimensions, for example `(time, depth, position)`.
+  Its other dimensions keep their full size in each row.
+- All other variables are dropped, also coordinates such as
+  `position (position)`. `on_drop` sets what happens: `"warn"` (default)
+  gives a `UserWarning`, `"raise"` gives a `ValueError`, and `"ignore"`
+  drops them silently.
+- Kept variables keep their attributes. Each row keeps the global
+  attributes.
+- `writer.write(..., chunks=...)` and `encode_chunks` compute one chunk at
+  a time. `encode(ds, chunks=...)` returns all chunks in one record batch,
+  so it loads all data.
 
 ### Encoding options
 

@@ -127,3 +127,17 @@ fn dotted_name_matches() {
     let plain = Expr::Column(Column::new_unqualified("a.b")).gt(lit(1));
     assert!(prune(plain).unwrap().is_some());
 }
+
+#[test]
+fn uncomparable_literal_keeps() {
+    for form in [
+        col("lat").gt(lit("abc")),
+        col("lat").eq(lit(true)),
+        col("name").lt(lit(1.0)),
+        col("lat").between(lit(1.0), lit("z")),
+        col("lat").in_list(vec![lit(1.0), lit("z")], false),
+    ] {
+        assert!(prune(form.clone()).unwrap().is_none(), "{form}");
+    }
+    assert!(prune(col("lat").gt(lit(1i64))).unwrap().is_some());
+}

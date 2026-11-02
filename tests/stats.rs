@@ -532,6 +532,48 @@ mod pruning {
         }
     }
 
+    #[tokio::test]
+    async fn signed_zero_keeps_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let rows = [-0.0, 0.0]
+            .into_iter()
+            .enumerate()
+            .map(|(id, x)| {
+                row(vec![
+                    ("id", Arc::new(Int64Array::from(vec![id as i64]))),
+                    ("x", Arc::new(Float64Array::from(vec![x]))),
+                ])
+            })
+            .collect();
+        let dataset = table(&dir, rows, true).await;
+        for filter in [
+            col("x").eq(lit(0.0)),
+            col("x").eq(lit(-0.0)),
+            col("x").gt_eq(lit(0.0)),
+            col("x").lt_eq(lit(-0.0)),
+            col("x").eq(lit(0i32)),
+        ] {
+            assert_eq!(
+                ids(scan(&dataset).filter_expr(filter.clone())).await,
+                [0, 1],
+                "{filter}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn uncastable_literal_keeps() {
+        let dir = tempfile::tempdir().unwrap();
+        let dataset = table(&dir, ocean(), true).await;
+        let filter = col("lat").gt(lit("abc")).or(col("name").eq(lit("a")));
+        assert_eq!(
+            ids(scan(&dataset).filter_expr(filter)).await,
+            [0, 1, 2, 3, 4]
+        );
+        let filter = col("lat").eq(lit(true)).and(col("name").eq(lit("a")));
+        assert_eq!(ids(scan(&dataset).filter_expr(filter)).await, [0]);
+    }
+
     /// A small xorshift generator with a fixed seed.
     struct Random(u64);
 

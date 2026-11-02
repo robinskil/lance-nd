@@ -14,7 +14,9 @@ use arrow::array::{
     Array, ArrayRef, AsArray, RecordBatch, StructArray, UInt64Array, make_comparator,
 };
 use arrow::compute::{SortOptions, take};
-use arrow::datatypes::{DataType, Field, Fields, Float16Type, Float32Type, Float64Type, Schema};
+use arrow::datatypes::{
+    ArrowPrimitiveType, DataType, Field, Fields, Float16Type, Float32Type, Float64Type, Schema,
+};
 use nd_arrow_array::extension::{VALUES_FIELD, is_nd_field};
 
 use crate::error::Result;
@@ -124,7 +126,33 @@ fn min_max(nd: &StructArray, offsets: &[i32], values: &dyn Array) -> Result<(Arr
     }
     let min = take(values, &UInt64Array::from(min), None)?;
     let max = take(values, &UInt64Array::from(max), None)?;
-    Ok((min, max))
+    Ok((widen_zero(&min, -0.0), widen_zero(&max, 0.0)))
+}
+
+/// `bounds` with each zero as `zero`. Total order puts -0.0 below 0.0, but a
+/// filter treats them as equal, so a min gets -0.0 and a max gets 0.0.
+fn widen_zero(bounds: &ArrayRef, zero: f64) -> ArrayRef {
+    match bounds.data_type() {
+        DataType::Float16 => {
+            let zero = <Float16Type as ArrowPrimitiveType>::Native::from_f64(zero);
+            Arc::new(
+                bounds
+                    .as_primitive::<Float16Type>()
+                    .unary::<_, Float16Type>(|v| if v.to_f64() == 0.0 { zero } else { v }),
+            )
+        }
+        DataType::Float32 => Arc::new(
+            bounds
+                .as_primitive::<Float32Type>()
+                .unary::<_, Float32Type>(|v| if v == 0.0 { zero as f32 } else { v }),
+        ),
+        DataType::Float64 => Arc::new(
+            bounds
+                .as_primitive::<Float64Type>()
+                .unary::<_, Float64Type>(|v| if v == 0.0 { zero } else { v }),
+        ),
+        _ => bounds.clone(),
+    }
 }
 
 fn is_nan(values: &dyn Array, i: usize) -> bool {

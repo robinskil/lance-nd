@@ -8,6 +8,7 @@
 //! - [`write()`] and [`append()`]: write a stream of nd record batches.
 //! - [`NdWriter`]: write in several calls and commit once.
 //! - [`scan()`]: read a stream of nd record batches, with a projection.
+//! - [`prune`]: change a DataFusion filter on values into a filter on the stats.
 //! - [`stats`]: opt-in min and max values per variable and row, for pruning.
 //! - [`ColumnOptions`]: Lance encoding options, like the compression, per column.
 //!
@@ -18,6 +19,7 @@
 pub mod encode;
 pub mod error;
 pub mod options;
+pub mod prune;
 pub mod scan;
 pub mod schema;
 pub mod stats;
@@ -26,6 +28,7 @@ pub mod writer;
 
 pub use error::{Error, Result};
 pub use lance::dataset::WriteMode;
+pub use lance::deps::datafusion;
 pub use options::{
     ByteStreamSplit, ColumnOptions, Compression, StructuralEncoding, column_defaults,
     set_column_defaults,

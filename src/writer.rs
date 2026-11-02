@@ -17,7 +17,9 @@ use nd_arrow_array::NdRecordBatch;
 use crate::error::{Error, Result};
 use crate::options::ColumnOptions;
 use crate::schema::{conform_batch, merge_schemas};
-use crate::write::{FILE_VERSION, WriteOptions, encode_group, next_group, table_defaults};
+use crate::write::{
+    FILE_VERSION, WriteOptions, encode_group, next_group, table_defaults, table_has_stats,
+};
 
 /// A writer that makes all its rows visible in one commit.
 ///
@@ -32,6 +34,8 @@ pub struct NdWriter {
     /// `true` when `finish` replaces the table.
     overwrite: bool,
     defaults: ColumnOptions,
+    /// `true` when the rows get stats.
+    stats: bool,
     options: WriteOptions,
     /// The table schema with all staged fields, as Arrow and as Lance.
     schema: Option<(Schema, LanceSchema)>,
@@ -65,6 +69,7 @@ impl NdWriter {
             base: existing,
             overwrite,
             defaults: options.column_defaults.clone().unwrap_or_default(),
+            stats: options.stats,
             options: options.clone(),
             schema: None,
             fragments: Vec::new(),
@@ -79,12 +84,14 @@ impl NdWriter {
             .await?
             .ok_or_else(|| Error::InvalidArgument(format!("no table at {uri}")))?;
         let defaults = table_defaults(&dataset, options)?;
+        let stats = table_has_stats(&dataset);
         let schema = (Schema::from(dataset.schema()), dataset.schema().clone());
         Ok(Self {
             uri: uri.to_string(),
             base: Some(dataset),
             overwrite: false,
             defaults,
+            stats,
             options: options.clone(),
             schema: Some(schema),
             fragments: Vec::new(),
@@ -113,7 +120,7 @@ impl NdWriter {
     async fn write_rows(&mut self, rows: impl Stream<Item = Result<NdRecordBatch>>) -> Result<()> {
         let mut rows = pin!(rows);
         while let Some(group) = next_group(&mut rows, &self.options).await? {
-            let batch = encode_group(&group, &self.defaults, &self.options)?;
+            let batch = encode_group(&group, &self.defaults, &self.options, self.stats)?;
             self.write_batch(batch).await?;
         }
         Ok(())

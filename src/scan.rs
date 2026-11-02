@@ -11,13 +11,14 @@ use nd_arrow_array::extension::GLOBAL_ATTRIBUTES_FIELD;
 
 use crate::encode::{RowDecoder, variable_field};
 use crate::error::{Error, Result};
+use crate::stats::STATS_FIELD;
 
 /// The variables of the table, as logical fields typed by their values.
 pub fn variables(dataset: &Dataset) -> Result<Vec<Field>> {
     Schema::from(dataset.schema())
         .fields()
         .iter()
-        .filter(|f| f.name() != GLOBAL_ATTRIBUTES_FIELD)
+        .filter(|f| f.name() != GLOBAL_ATTRIBUTES_FIELD && f.name() != STATS_FIELD)
         .map(|f| variable_field(f))
         .collect()
 }
@@ -118,10 +119,9 @@ impl NdScanner<'_> {
         scanner.batch_size_bytes(self.batch_size_bytes);
         if let Some(projection) = &self.projection {
             let schema = self.dataset.schema();
-            if let Some(unknown) = projection
-                .iter()
-                .find(|v| *v == GLOBAL_ATTRIBUTES_FIELD || schema.field(v).is_none())
-            {
+            if let Some(unknown) = projection.iter().find(|v| {
+                *v == GLOBAL_ATTRIBUTES_FIELD || *v == STATS_FIELD || schema.field(v).is_none()
+            }) {
                 return Err(Error::InvalidArgument(format!(
                     "'{unknown}' is not a variable of the table"
                 )));

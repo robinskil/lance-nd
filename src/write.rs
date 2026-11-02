@@ -16,6 +16,7 @@ use crate::encode::encode_rows;
 use crate::error::{Error, Result};
 use crate::options::{ColumnOptions, column_defaults, with_column_options};
 use crate::schema::{conform_batch, merge_schemas, missing_fields};
+use crate::stats::{add_stats, has_stats};
 
 /// Lance file version for new tables. Version 2.2 can add nested fields,
 /// which new attribute keys need.
@@ -37,6 +38,10 @@ pub struct WriteOptions {
     /// Encoding options per column name, over the defaults. They apply when
     /// this write adds the column. Lance keeps them for later appends.
     pub column_options: HashMap<String, ColumnOptions>,
+    /// Store the min and max of each variable per row, see [`crate::stats`].
+    /// Only a new table or an overwrite reads it. An append writes stats
+    /// when the table has them.
+    pub stats: bool,
 }
 
 impl Default for WriteOptions {
@@ -47,6 +52,7 @@ impl Default for WriteOptions {
             max_values_per_commit: 1 << 26,
             column_defaults: None,
             column_options: HashMap::new(),
+            stats: false,
         }
     }
 }
@@ -70,13 +76,16 @@ pub async fn write(
         },
         WriteMode::Create | WriteMode::Overwrite => None,
     };
-    let defaults = match &dataset {
-        Some(dataset) => table_defaults(dataset, options)?,
-        None => options.column_defaults.clone().unwrap_or_default(),
+    let (defaults, stats) = match &dataset {
+        Some(dataset) => (table_defaults(dataset, options)?, table_has_stats(dataset)),
+        None => (
+            options.column_defaults.clone().unwrap_or_default(),
+            options.stats,
+        ),
     };
     let mut rows = pin!(rows);
     while let Some(group) = next_group(&mut rows, options).await? {
-        let batch = encode_group(&group, &defaults, options)?;
+        let batch = encode_group(&group, &defaults, options, stats)?;
         match dataset.as_mut() {
             Some(dataset) => append_batch(dataset, batch).await?,
             None => {
@@ -105,9 +114,10 @@ pub async fn append(
     options: &WriteOptions,
 ) -> Result<()> {
     let defaults = table_defaults(dataset, options)?;
+    let stats = table_has_stats(dataset);
     let mut rows = pin!(rows);
     while let Some(group) = next_group(&mut rows, options).await? {
-        append_batch(dataset, encode_group(&group, &defaults, options)?).await?;
+        append_batch(dataset, encode_group(&group, &defaults, options, stats)?).await?;
     }
     Ok(())
 }
@@ -124,16 +134,28 @@ pub(crate) fn table_defaults(dataset: &Dataset, options: &WriteOptions) -> Resul
     }
 }
 
-/// Encode one group with the encoding metadata of its columns.
-/// The schema metadata holds the defaults, which a new table stores.
+/// `true` when the table stores stats.
+pub(crate) fn table_has_stats(dataset: &Dataset) -> bool {
+    has_stats(&Schema::from(dataset.schema()))
+}
+
+/// Encode one group with the encoding metadata of its columns, and with
+/// stats when `stats` is `true`. The schema metadata holds the defaults and
+/// the stats marker, which a new table stores.
 pub(crate) fn encode_group(
     group: &[NdRecordBatch],
     defaults: &ColumnOptions,
     options: &WriteOptions,
+    stats: bool,
 ) -> Result<RecordBatch> {
-    let batch = encode_rows(group)?;
+    let mut batch = encode_rows(group)?;
+    if stats {
+        batch = add_stats(&batch)?;
+    }
+    let mut metadata = batch.schema().metadata().clone();
+    metadata.extend(defaults.to_table_metadata());
     let schema = with_column_options(&batch.schema(), defaults, &options.column_options)
-        .with_metadata(defaults.to_table_metadata());
+        .with_metadata(metadata);
     conform_batch(&batch, &Arc::new(schema))
 }
 

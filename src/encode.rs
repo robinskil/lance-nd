@@ -17,6 +17,7 @@ use nd_arrow_array::{Attributes, NdColumn, NdColumnBuilder, NdRecordBatch};
 use crate::error::{Error, Result};
 use crate::options::without_encoding_metadata;
 use crate::schema::conform_batch;
+use crate::stats::STATS_FIELD;
 
 /// Encode `rows` as one record batch, one row per nd record batch.
 ///
@@ -25,9 +26,10 @@ use crate::schema::conform_batch;
 pub fn encode_rows(rows: &[NdRecordBatch]) -> Result<RecordBatch> {
     let mut variables: Vec<FieldRef> = Vec::new();
     for field in rows.iter().flat_map(|r| r.schema().fields().iter()) {
-        if field.name() == GLOBAL_ATTRIBUTES_FIELD {
+        if field.name() == GLOBAL_ATTRIBUTES_FIELD || field.name() == STATS_FIELD {
             return Err(Error::SchemaMismatch(format!(
-                "variable name '{GLOBAL_ATTRIBUTES_FIELD}' is reserved"
+                "variable name '{}' is reserved",
+                field.name()
             )));
         }
         match variables.iter().find(|v| v.name() == field.name()) {
@@ -93,13 +95,15 @@ pub struct RowDecoder {
 }
 
 impl RowDecoder {
-    /// A decoder for `batch`. Each column must be an nd column or the
-    /// global attributes column. The Lance encoding keys are removed.
+    /// A decoder for `batch`. Each column must be an nd column, the global
+    /// attributes column or the stats column, which the decoder ignores.
+    /// The Lance encoding keys are removed.
     pub fn try_new(batch: &RecordBatch) -> Result<Self> {
         let fields: Vec<Field> = batch
             .schema()
             .fields()
             .iter()
+            .filter(|field| field.name() != STATS_FIELD)
             .map(|field| without_encoding_metadata(field))
             .collect();
         let schema = Arc::new(Schema::new(fields));

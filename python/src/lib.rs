@@ -11,6 +11,7 @@ use arrow::pyarrow::PyArrowType;
 use futures::stream;
 use lance::Dataset;
 use lance_nd::encode::{RowDecoder, encode_rows};
+use lance_nd::stats::has_stats;
 use lance_nd::{
     ByteStreamSplit, ColumnOptions, Compression, NdWriter, StructuralEncoding, WriteMode,
     WriteOptions, scan, variables,
@@ -60,14 +61,16 @@ impl Writer {
 #[pymethods]
 impl Writer {
     /// A writer for a new table. `mode` is "create" or "overwrite".
+    /// `stats` stores the min and max of each variable per row.
     #[staticmethod]
-    #[pyo3(signature = (uri, mode = "create", column_defaults = None, column_options = None))]
+    #[pyo3(signature = (uri, mode = "create", column_defaults = None, column_options = None, stats = false))]
     fn create(
         py: Python<'_>,
         uri: String,
         mode: &str,
         column_defaults: Option<&Bound<'_, PyDict>>,
         column_options: Option<&Bound<'_, PyDict>>,
+        stats: bool,
     ) -> PyResult<Self> {
         let mode = match mode {
             "create" => WriteMode::Create,
@@ -82,6 +85,7 @@ impl Writer {
             mode,
             column_defaults: column_defaults.map(parse_options).transpose()?,
             column_options: parse_column_options(column_options)?,
+            stats,
             ..Default::default()
         };
         let writer = block_on(py, NdWriter::create(&uri, &options)).map_err(to_py)?;
@@ -166,6 +170,12 @@ impl Table {
     #[getter]
     fn version(&self) -> u64 {
         self.dataset.version().version
+    }
+
+    /// `true` when the table stores the min and max of each variable per row.
+    #[getter]
+    fn has_stats(&self) -> bool {
+        has_stats(&self.dataset.schema().into())
     }
 
     /// The number of datasets in the table.

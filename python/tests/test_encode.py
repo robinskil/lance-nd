@@ -265,3 +265,9 @@ def test_too_many_values_raises():
     rows = [(Big(), ["n"], (2**30,), {}), (Big(), ["n"], (2**30,), {})]
     with pytest.raises(ValueError, match="'v'"):
         _column("v", rows)
+
+
+def test_stats_name_reserved():
+    ds = xr.Dataset({"__stats__": (("n",), np.zeros(2))})
+    with pytest.raises(ValueError, match="__stats__"):
+        encode(ds)

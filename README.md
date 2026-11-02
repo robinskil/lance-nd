@@ -41,6 +41,8 @@ lance-nd is a general way to store N-dimensional array data in a
 
 The Lance table schema **is** the nd-arrow encoding. lance-nd adds no extra
 columns and no private layout, so any Arrow or Lance reader can read the data.
+The one exception is opt-in: a table with stats has one extra `__stats__`
+column, see [Stats and pruning](#stats-and-pruning).
 
 ## The nd-arrow encoding
 
@@ -141,6 +143,37 @@ attributes, for example `id` or `chunk_offset`, then filter on them:
 __global_attrs__.id = 'a'
 ```
 
+### Stats and pruning
+
+A table created with `WriteOptions { stats: true, .. }` stores the min and the
+max of each variable per row, in one extra `__stats__` column. Null and NaN
+values do not count. Numeric, string, timestamp, date, time and duration
+variables get stats. An append writes stats when the table has them.
+
+A scan can then skip the rows that surely have no matching value. Give it a
+DataFusion filter on the values:
+
+```rust
+use lance_nd::datafusion::prelude::{col, lit};
+
+let rows = scan(&table)
+    .filter_expr(col("lat").between(lit(17.5), lit(25.4)).and(col("station").eq(lit("A1"))))
+    .try_into_stream()
+    .await?;
+```
+
+- The filter supports `=`, `<`, `<=`, `>`, `>=`, `between` and `in`, with a
+  literal, and `AND` and `OR` of these.
+- A kept row comes back whole. It can hold values outside the filter.
+- A part of the filter without a stats form keeps all rows, for example
+  `NOT`, `!=` or `col("t") * 2 > 10`.
+- A row without the variable does not match.
+- A name that is not a variable gives an error.
+- A table without stats keeps all rows.
+
+`lance_nd::datafusion` is the DataFusion version of Lance. Use it to build
+the filter. Older lance-nd releases cannot read a table with stats.
+
 ### Column encoding
 
 Each column can have its own Lance encoding: compression, compression level,
@@ -186,7 +219,7 @@ The main functions:
 | `write(uri, rows, &options)` | Create, append to or overwrite a table from a stream of nd record batches. |
 | `append(&mut table, rows, &options)` | Append a stream of nd record batches to an open table. |
 | `NdWriter::create` and `NdWriter::append` | Write nd record batches in several calls, then commit all of them in one version with `finish`. |
-| `scan(&table)` | Read nd record batches as a stream, with `project`, `filter` and `limit`. |
+| `scan(&table)` | Read nd record batches as a stream, with `project`, `filter`, `filter_expr` and `limit`. |
 | `variables(&table)` | List the array columns of the table. |
 | `column_defaults` and `set_column_defaults` | Read and change the encoding defaults for new columns. |
 

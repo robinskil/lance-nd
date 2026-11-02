@@ -4,6 +4,7 @@ import xarray as xr
 
 import lance_nd
 from lance_nd import LanceNdError, encode
+from lance_nd._lance_nd import _scan_batch
 
 
 def dataset(title):
@@ -117,3 +118,18 @@ def test_failed_finish_inside_with_block_keeps_its_error(table_uri):
             late.write(dataset("b"))
             late.finish()
     assert lance_nd.open(table_uri).count_rows() == 1
+
+
+def test_create_with_stats(table_uri):
+    with lance_nd.create(table_uri, stats=True) as writer:
+        writer.write(dataset("a"))
+    table = lance_nd.open(table_uri)
+    assert table.has_stats
+    assert "__stats__" not in table.variables()
+    assert "__stats__" not in _scan_batch(table_uri).schema.names
+
+
+def test_stats_off_by_default(table_uri):
+    with lance_nd.create(table_uri) as writer:
+        writer.write(dataset("a"))
+    assert not lance_nd.open(table_uri).has_stats

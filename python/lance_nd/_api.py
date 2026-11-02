@@ -96,9 +96,14 @@ def create(
     mode: Mode = "create",
     column_defaults: ColumnOptions | None = None,
     column_options: dict[str, ColumnOptions] | None = None,
+    stats: bool = False,
 ) -> Writer:
-    """A writer for a new table. ``mode`` is "create" or "overwrite"."""
-    return Writer(_lance_nd.Writer.create(uri, mode, column_defaults, column_options))
+    """A writer for a new table. ``mode`` is "create" or "overwrite".
+
+    ``stats`` stores the min and max of each variable per row, so that a
+    Rust scan can skip rows. An append follows the table.
+    """
+    return Writer(_lance_nd.Writer.create(uri, mode, column_defaults, column_options, stats))
 
 
 def append(uri: str, column_options: dict[str, ColumnOptions] | None = None) -> Writer:

@@ -120,6 +120,12 @@ lance_nd.create(
 )
 ```
 
+### Stats
+
+`create(uri, stats=True)` stores the min and the max of each variable per
+row. A Rust scan with `filter_expr` uses them to skip rows. An append
+follows the table. `Table.has_stats` tells if a table stores stats.
+
 ### Type hints
 
 The package has type hints and a `py.typed` marker. The stub

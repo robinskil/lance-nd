@@ -40,8 +40,8 @@ Rules:
    only add nullable columns to an existing table, so a writer makes it
    nullable. A null row has no global attributes.
 6. The column order has no meaning.
-7. The table schema metadata holds the column defaults, see section 6.
-   Other keys have no meaning. The field metadata of an array column comes
+7. The table schema metadata holds the column defaults, see section 6,
+   and the stats marker, see section 7. Other keys have no meaning. The field metadata of an array column comes
    from the first row with that array.
 
 ## 3. Grid
@@ -89,3 +89,33 @@ override the defaults. A column keeps its encoding when the defaults change.
 
 A reader removes the `lance-encoding:` keys from the arrays and attributes
 that it returns.
+
+## 7. Stats
+
+Stats are optional. A table with stats has the table schema metadata key
+`lance_nd:stats = true` and a `__stats__` column. A table without this key
+has no `__stats__` column.
+
+| Column | Type | Nullable |
+|---|---|---|
+| `__stats__` | `Struct`, one child per variable with stats | yes |
+
+Rules:
+
+1. A child has the name of its variable and the type
+   `Struct{min: T, max: T}`, where `T` is the value type of the variable.
+   The child and its fields are nullable.
+2. Integer, float, `Utf8`, `LargeUtf8`, `Utf8View`, `Timestamp`, `Date32`,
+   `Date64`, `Time32`, `Time64` and `Duration` variables get a child. Other
+   variables get none.
+3. `min` and `max` are the smallest and the largest value of the variable in
+   the row. Null and NaN values do not count. Strings order by UTF-8 bytes.
+4. A null child means that the row does not have the variable.
+5. A valid child with null `min` and `max` means that the row has the
+   variable, but no value counts.
+6. A table with the key but without a variable that gets a child has no
+   `__stats__` column yet. A later write adds it.
+7. `__stats__` is a reserved array name. A reader leaves the column out of
+   the nd record batches.
+8. A writer adds stats to each row when the table has the key. Only the
+   create or the overwrite of a table sets the key.

@@ -16,8 +16,12 @@ class Writer:
         mode: Mode = "create",
         column_defaults: ColumnOptions | None = None,
         column_options: dict[str, ColumnOptions] | None = None,
+        stats: bool = False,
     ) -> Writer:
-        """A writer for a new table. ``mode`` is "create" or "overwrite"."""
+        """A writer for a new table. ``mode`` is "create" or "overwrite".
+
+        ``stats`` stores the min and max of each variable per row.
+        """
 
     @staticmethod
     def append(uri: str, column_options: dict[str, ColumnOptions] | None = None) -> Writer:
@@ -46,6 +50,10 @@ class Table:
     @property
     def version(self) -> int:
         """The Lance version of the table."""
+
+    @property
+    def has_stats(self) -> bool:
+        """``True`` when the table stores the min and max of each variable per row."""
 
     def count_rows(self) -> int:
         """The number of datasets in the table."""

@@ -17,6 +17,8 @@ GLOBAL_ATTRIBUTES_METADATA = {
 }
 _DIM_NAMES = pa.list_(pa.field("item", pa.string(), nullable=False))
 _DIM_SIZES = pa.list_(pa.field("item", pa.uint32(), nullable=False))
+# Version 1 uses List with 32-bit offsets.
+_MAX_VALUES = 2**31 - 1
 
 
 def encode(datasets: xr.Dataset | Sequence[xr.Dataset]) -> pa.RecordBatch:
@@ -119,11 +121,16 @@ def _column(name: str, rows: list) -> pa.StructArray:
         raise TypeError(f"variable '{name}' has more than one value type: {found}")
     value_type = types.pop()
     present = [row for row in rows if row is not None]
-    offsets = np.zeros(len(rows) + 1, dtype=np.int32)
+    offsets = np.zeros(len(rows) + 1, dtype=np.int64)
     offsets[1:] = np.cumsum([0 if row is None else len(row[0]) for row in rows])
+    if offsets[-1] > _MAX_VALUES:
+        raise ValueError(
+            f"variable '{name}' has {offsets[-1]} values over all datasets, "
+            f"more than the format allows in one batch ({_MAX_VALUES}); write fewer datasets at once"
+        )
     flat = pa.concat_arrays([row[0] for row in present])
     values = pa.ListArray.from_arrays(
-        pa.array(offsets), flat, type=pa.list_(pa.field("item", value_type, nullable=True))
+        pa.array(offsets.astype(np.int32)), flat, type=pa.list_(pa.field("item", value_type, nullable=True))
     )
     dim_names = pa.array([[] if row is None else row[1] for row in rows], type=_DIM_NAMES)
     dim_sizes = pa.array([[] if row is None else list(row[2]) for row in rows], type=_DIM_SIZES)
@@ -168,7 +175,7 @@ def _attr(key: str, value) -> tuple[pa.DataType, object]:
         items = [_scalar(key, v) for v in value.tolist()] if value.dtype.kind in "OUS" else None
         if items is None:
             data = value if value.dtype.isnative else value.astype(value.dtype.newbyteorder("="))
-            array = pa.array(data, from_pandas=True)
+            array = pa.array(data)
             return pa.list_(array.type), array.to_pylist()
         return _scalar_list(key, items)
     if isinstance(value, list | tuple):
@@ -191,7 +198,7 @@ def _scalar(key: str, value) -> tuple[pa.DataType, object]:
     if isinstance(value, bool | np.bool_):
         return pa.bool_(), bool(value)
     if isinstance(value, np.generic):
-        array = pa.array(np.asarray([value]), from_pandas=True)
+        array = pa.array(np.asarray([value]))
         return array.type, array[0].as_py()
     if isinstance(value, int):
         return pa.int64(), value

@@ -21,6 +21,9 @@ class Writer:
 
     def __init__(self, native: _lance_nd.Writer):
         self._native = native
+        self._closed = False
+        #: The committed table after ``finish()``, else ``None``.
+        self.table: Table | None = None
 
     def write(self, data: xr.Dataset | Sequence[xr.Dataset] | pa.RecordBatch) -> None:
         """Write a dataset, a list of datasets or an nd-arrow record batch."""
@@ -39,16 +42,26 @@ class Writer:
 
     def finish(self) -> Table:
         """Commit all written datasets in one new table version."""
-        return self._native.finish()
+        try:
+            self.table = self._native.finish()
+        finally:
+            self._closed = True
+        return self.table
 
     def abort(self) -> None:
         """Drop all written datasets without a commit."""
-        self._native.abort()
+        try:
+            self._native.abort()
+        finally:
+            self._closed = True
 
     def __enter__(self) -> "Writer":
         return self
 
     def __exit__(self, exc_type, exc, traceback) -> None:
+        # A finish() or abort() inside the block already closed the writer.
+        if self._closed:
+            return
         if exc_type is None:
             self.finish()
         else:

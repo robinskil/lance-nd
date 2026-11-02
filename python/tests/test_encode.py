@@ -242,3 +242,26 @@ def test_dask_is_loaded():
 def test_rejects_other_input():
     with pytest.raises(TypeError):
         encode([42])
+
+
+def test_nan_attribute_is_kept():
+    ds = xr.Dataset(
+        {"v": (("n",), np.zeros(2), {"_FillValue": np.float32("nan"), "range": np.array([np.nan, 1.0])})}
+    )
+    attrs = encode(ds).column("v")[0].as_py()["attrs"]
+    assert attrs["_FillValue"] is not None and np.isnan(attrs["_FillValue"])
+    assert np.isnan(attrs["range"][0]) and attrs["range"][1] == 1.0
+
+
+def test_too_many_values_raises():
+    from lance_nd._encode import _column
+
+    class Big:
+        type = pa.float32()
+
+        def __len__(self):
+            return 2**30
+
+    rows = [(Big(), ["n"], (2**30,), {}), (Big(), ["n"], (2**30,), {})]
+    with pytest.raises(ValueError, match="'v'"):
+        _column("v", rows)

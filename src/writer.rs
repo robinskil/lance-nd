@@ -189,7 +189,14 @@ impl NdWriter {
         };
         let fragments = self.fragments;
         let dataset = match (self.base, self.overwrite) {
-            (None, _) => {
+            (None, overwrite) => {
+                // Another writer can create the table after `create`.
+                if !overwrite && open_existing(&self.uri).await?.is_some() {
+                    return Err(Error::InvalidArgument(format!(
+                        "a table exists at {}",
+                        self.uri
+                    )));
+                }
                 let operation = overwrite_operation(numbered(fragments, 0), schema);
                 CommitBuilder::new(self.uri.as_str())
                     .with_storage_format(FILE_VERSION)

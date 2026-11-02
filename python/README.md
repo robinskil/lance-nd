@@ -58,7 +58,8 @@ Rules:
 
 - A writer that you abort, or that you do not finish, commits nothing.
 - As a context manager, the writer finishes at the end of the block. When
-  the block raises, the writer aborts.
+  the block raises, the writer aborts. If you call `finish()` in the block,
+  the block does not finish again. `writer.table` holds the committed table.
 - `finish()` on a new table without datasets raises an error. On an append
   without datasets, it makes no commit.
 - A failed `write()` makes the writer fail. `finish()` then commits nothing.
@@ -126,7 +127,9 @@ attribute. A dataset or variable that already has a `coordinates`
 attribute raises a `ValueError`.
 
 In a list of datasets, one variable must have one value type, and one
-attribute key must have one type.
+attribute key must have one type. One `write()` call holds at most
+2,147,483,647 values per variable over all its datasets. For more, write
+fewer datasets per call.
 
 ## Tests
 

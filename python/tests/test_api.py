@@ -97,3 +97,23 @@ def test_options_pass_through(table_uri):
     )
     writer.write(dataset("a"))
     assert sorted(writer.finish().variables()) == ["sst", "time"]
+
+
+def test_finish_inside_with_block(table_uri):
+    with lance_nd.create(table_uri) as writer:
+        writer.write(dataset("a"))
+        table = writer.finish()
+    assert table.count_rows() == 1
+    assert writer.table.version == 1
+    assert lance_nd.open(table_uri).count_rows() == 1
+
+
+def test_failed_finish_inside_with_block_keeps_its_error(table_uri):
+    late = lance_nd.create(table_uri)
+    with lance_nd.create(table_uri) as writer:
+        writer.write(dataset("a"))
+    with pytest.raises(LanceNdError, match="a table exists"):
+        with late:
+            late.write(dataset("b"))
+            late.finish()
+    assert lance_nd.open(table_uri).count_rows() == 1

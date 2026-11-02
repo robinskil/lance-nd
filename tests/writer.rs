@@ -313,3 +313,28 @@ async fn concurrent_plain_appends_both_commit() {
     assert_eq!(dataset.version().version, version + 2);
     assert_eq!(dataset.count_rows(None).await.unwrap(), 3);
 }
+
+#[tokio::test]
+async fn create_fails_when_another_writer_created_the_table() {
+    let dir = tempfile::tempdir().unwrap();
+    let uri = uri(&dir);
+    let mut first = NdWriter::create(&uri, &WriteOptions::default())
+        .await
+        .unwrap();
+    let mut second = NdWriter::create(&uri, &WriteOptions::default())
+        .await
+        .unwrap();
+    first
+        .write(rows(vec![sst(2, "a"), sst(2, "b")]))
+        .await
+        .unwrap();
+    second.write(rows(vec![sst(2, "c")])).await.unwrap();
+    second.finish().await.unwrap();
+    assert!(matches!(
+        first.finish().await,
+        Err(Error::InvalidArgument(_))
+    ));
+    let dataset = Dataset::open(&uri).await.unwrap();
+    assert_eq!(dataset.version().version, 1);
+    assert_eq!(dataset.count_rows(None).await.unwrap(), 1);
+}

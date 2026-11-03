@@ -32,6 +32,7 @@ pub fn scan(dataset: &Dataset) -> NdScanner<'_> {
         projection: None,
         filter: None,
         filter_expr: None,
+        lance_filter: None,
         fragments: None,
         limit: None,
         batch_size: DEFAULT_BATCH_SIZE,
@@ -56,6 +57,7 @@ pub struct NdScanner<'a> {
     projection: Option<Vec<String>>,
     filter: Option<String>,
     filter_expr: Option<Expr>,
+    lance_filter: Option<Expr>,
     fragments: Option<Vec<Fragment>>,
     limit: Option<i64>,
     batch_size: usize,
@@ -73,6 +75,9 @@ impl NdScanner<'_> {
     }
 
     /// Read only the rows that match a Lance SQL filter.
+    ///
+    /// A scan cannot have both this filter and a DataFusion filter, see
+    /// [`NdScanner::filter_expr`] and [`NdScanner::lance_filter`].
     pub fn filter(mut self, filter: impl Into<String>) -> Self {
         self.filter = Some(filter.into());
         self
@@ -80,13 +85,26 @@ impl NdScanner<'_> {
 
     /// Skip the rows that surely have no value that matches `expr`.
     ///
-    /// `expr` is a DataFusion filter on the variable values, for example
-    /// `col("lat").between(lit(17.5), lit(25.4))`. The scan uses the stats of
-    /// the table, see [`crate::prune`]. A kept row comes back whole, also
-    /// with values outside the filter. A table without stats keeps all rows.
-    /// A scan cannot have both [`NdScanner::filter`] and this filter.
+    /// `expr` is a DataFusion filter on the table columns, for example
+    /// `get_field(col("lat"), "values").between(lit(17.5), lit(25.4))`. A
+    /// part on `<variable>.values` uses the stats of the table, see
+    /// [`crate::prune`]. A kept row comes back whole, also with values
+    /// outside the filter. A table without stats keeps all rows for a value
+    /// part. Each other part, for example on attributes, filters the rows
+    /// exactly.
     pub fn filter_expr(mut self, expr: Expr) -> Self {
         self.filter_expr = Some(expr);
+        self
+    }
+
+    /// Read only the rows that match `expr`, a DataFusion filter on the
+    /// Lance table columns.
+    ///
+    /// Lance gets `expr` with no change, so `expr` must use the table
+    /// columns: the nd columns, `__global_attrs__` and `__stats__`. With
+    /// [`NdScanner::filter_expr`], a row must match both filters.
+    pub fn lance_filter(mut self, expr: Expr) -> Self {
+        self.lance_filter = Some(expr);
         self
     }
 
@@ -148,19 +166,24 @@ impl NdScanner<'_> {
             }
             scanner.project(&columns)?;
         }
-        if self.filter.is_some() && self.filter_expr.is_some() {
+        if self.filter.is_some() && (self.filter_expr.is_some() || self.lance_filter.is_some()) {
             return Err(Error::InvalidArgument(
-                "a scan cannot have both filter and filter_expr".to_string(),
+                "a scan cannot have both filter and a DataFusion filter".to_string(),
             ));
         }
         if let Some(filter) = &self.filter {
             scanner.filter(filter)?;
         }
-        if let Some(expr) = &self.filter_expr {
-            let table = Schema::from(self.dataset.schema());
-            if let Some(stats_filter) = prune_filter(expr, &table)? {
-                scanner.filter_expr(stats_filter);
-            }
+        let pruned = match &self.filter_expr {
+            Some(expr) => prune_filter(expr, &Schema::from(self.dataset.schema()))?,
+            None => None,
+        };
+        if let Some(expr) = pruned
+            .into_iter()
+            .chain(self.lance_filter.clone())
+            .reduce(Expr::and)
+        {
+            scanner.filter_expr(expr);
         }
         if let Some(fragments) = &self.fragments {
             scanner.with_fragments(fragments.clone());

@@ -1,43 +1,45 @@
-//! Change a filter on variable values into a filter on the stats column.
+//! Change a filter on the table columns into a filter for a scan with stats.
 //!
-//! The changed filter keeps every row that can match. It skips a row only
-//! when the stats show that no value of the row matches. A part of the
-//! filter that has no stats form keeps every row.
+//! The filter uses the Lance table columns, for example
+//! `get_field(col("sst"), "values")`, `get_field(col("sst"), "attrs")` or
+//! `get_field(col("__global_attrs__"), "id")`. lance-nd does not check or
+//! change the names, so Lance reports a wrong name in the scan.
+//!
+//! A value part reads `<variable>.values`. It changes into a filter on the
+//! stats column. The changed part keeps every row that can match, and skips
+//! a row only when the stats show that no value of the row matches. A value
+//! part without a stats form keeps every row.
+//!
+//! Each other part, for example on attributes, is exact for a row, so it
+//! stays as it is. These rules apply:
+//!
+//! - `AND`: a side without a stats form goes away, so more rows are kept.
+//! - `OR`: both sides need a form, or the full `OR` keeps every row.
+//! - `NOT`: only over parts without values. Over a value part, it keeps
+//!   every row.
 
 use arrow::datatypes::{DataType, Schema};
 use lance::deps::datafusion::common::Column;
+use lance::deps::datafusion::common::tree_node::{TreeNode, TreeNodeRecursion};
 use lance::deps::datafusion::functions::core::expr_fn::get_field;
 use lance::deps::datafusion::logical_expr::expr::{Between, BinaryExpr, InList};
 use lance::deps::datafusion::logical_expr::{Expr, Operator, col};
 use nd_arrow_array::extension::GLOBAL_ATTRIBUTES_FIELD;
 
-use crate::error::{Error, Result};
+use crate::error::Result;
 use crate::stats::STATS_FIELD;
 
-/// A filter on the stats column of `table` for `expr`, a filter on the values.
+/// A filter for a scan of `table` with the rows that can match `expr`.
 ///
-/// `None` means that every row is kept. A name in `expr` that is not a
-/// variable of `table` gives [`Error::InvalidArgument`].
+/// See the [module](self) documentation for the forms. `None` means that
+/// every row is kept.
 pub fn prune_filter(expr: &Expr, table: &Schema) -> Result<Option<Expr>> {
-    for column in expr.column_refs() {
-        let name = column.flat_name();
-        if name == GLOBAL_ATTRIBUTES_FIELD
-            || name == STATS_FIELD
-            || table.field_with_name(&name).is_err()
-        {
-            return Err(Error::InvalidArgument(format!(
-                "'{name}' is not a variable of the table"
-            )));
-        }
-    }
-    let Ok(stats) = table.field_with_name(STATS_FIELD) else {
-        return Ok(None);
-    };
-    let DataType::Struct(children) = stats.data_type() else {
-        return Ok(None);
+    let children = match table.field_with_name(STATS_FIELD).map(|f| f.data_type()) {
+        Ok(DataType::Struct(children)) => Some(children),
+        _ => None,
     };
     let value_type = |name: &str| {
-        let (_, child) = children.find(name)?;
+        let (_, child) = children?.find(name)?;
         match child.data_type() {
             DataType::Struct(bounds) => bounds.find("min").map(|(_, f)| f.data_type().clone()),
             _ => None,
@@ -46,8 +48,52 @@ pub fn prune_filter(expr: &Expr, table: &Schema) -> Result<Option<Expr>> {
     Ok(rewrite(expr, &value_type))
 }
 
+/// The column and the field names of a column or a `get_field` path.
+fn field_path(expr: &Expr) -> Option<(&Column, Vec<&str>)> {
+    match expr {
+        Expr::Column(column) => Some((column, Vec::new())),
+        Expr::ScalarFunction(function) if function.name() == "get_field" => {
+            let (base, names) = function.args.split_first()?;
+            let (column, mut path) = field_path(base)?;
+            for name in names {
+                let Expr::Literal(value, _) = name else {
+                    return None;
+                };
+                path.push(value.try_as_str()??);
+            }
+            Some((column, path))
+        }
+        _ => None,
+    }
+}
+
+/// The variable of a `<variable>.values` path.
+fn values_of(expr: &Expr) -> Option<String> {
+    let (column, path) = field_path(expr)?;
+    let name = column.flat_name();
+    (name != GLOBAL_ATTRIBUTES_FIELD && path.first() == Some(&"values")).then_some(name)
+}
+
+/// `true` when `expr` reads the values of a variable.
+fn reads_values(expr: &Expr) -> bool {
+    let mut found = false;
+    expr.apply(|e| {
+        found = values_of(e).is_some();
+        Ok(if found {
+            TreeNodeRecursion::Stop
+        } else {
+            TreeNodeRecursion::Continue
+        })
+    })
+    .expect("the visit does not fail");
+    found
+}
+
 /// The stats form of `expr`, or `None` when it keeps every row.
 fn rewrite(expr: &Expr, value_type: &ValueType<'_>) -> Option<Expr> {
+    if !reads_values(expr) {
+        return Some(expr.clone());
+    }
     match expr {
         Expr::BinaryExpr(BinaryExpr { left, op, right }) => match op {
             Operator::And => match (rewrite(left, value_type), rewrite(right, value_type)) {
@@ -132,12 +178,10 @@ fn comparable(value: &DataType, literal: &DataType) -> bool {
 struct Stats(Expr, DataType);
 
 impl Stats {
-    /// The stats of `expr` when it is a variable with a stats child.
+    /// The stats of `expr` when it reads the values of a variable with a
+    /// stats child.
     fn of(expr: &Expr, value_type: &ValueType<'_>) -> Option<Self> {
-        let Expr::Column(column) = expr else {
-            return None;
-        };
-        let name = column.flat_name();
+        let name = values_of(expr)?;
         let value_type = value_type(&name)?;
         let child = get_field(col(Column::new_unqualified(STATS_FIELD)), name);
         Some(Self(child, value_type))

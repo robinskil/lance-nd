@@ -151,25 +151,51 @@ values do not count. Numeric, string, timestamp, date, time and duration
 variables get stats. An append writes stats when the table has them.
 
 A scan can then skip the rows that surely have no matching value. Give it a
-DataFusion filter on the values:
+DataFusion filter on the table columns. The values of a variable are the
+column path `<variable>.values`:
 
 ```rust
+use lance_nd::datafusion::functions::core::expr_fn::get_field;
 use lance_nd::datafusion::prelude::{col, lit};
 
+let lat = get_field(col("lat"), "values");
+let units = get_field(get_field(col("sst"), "attrs"), "units");
 let rows = scan(&table)
-    .filter_expr(col("lat").between(lit(17.5), lit(25.4)).and(col("station").eq(lit("A1"))))
+    .filter_expr(lat.between(lit(17.5), lit(25.4)).and(units.eq(lit("K"))))
     .try_into_stream()
     .await?;
 ```
 
+lance-nd does not check or change the column names. A wrong name gives an
+error in the scan. In an `Expr`, write a nested column such as `sst.values`
+with `get_field`: Lance does not resolve `col("sst.values")`.
+
 - The filter supports `=`, `<`, `<=`, `>`, `>=`, `between` and `in`, with a
   literal, and `AND` and `OR` of these.
 - A kept row comes back whole. It can hold values outside the filter.
-- A part of the filter without a stats form keeps all rows, for example
-  `NOT`, `!=` or `col("t") * 2 > 10`.
+- A value part without a stats form keeps all rows, for example `NOT`,
+  `!=` or `t.values * 2 > 10`.
 - A row without the variable does not match.
-- A name that is not a variable gives an error.
 - A table without stats keeps all rows.
+
+A part that does not read values, for example on
+`__global_attrs__.id` or `sst.attrs.units`, filters the rows exactly, so it
+stays as it is:
+
+- `AND`: a side without a stats form goes away.
+- `OR`: both sides need a form, or the full `OR` keeps all rows.
+- `NOT`: only over parts that do not read values.
+
+Use one filter API for each case:
+
+| Filter | API |
+|---|---|
+| Lance SQL text | `filter` |
+| DataFusion `Expr` on the table columns, with values as stats | `filter_expr` |
+| DataFusion `Expr` on the Lance table columns, with no change | `lance_filter` |
+
+`filter_expr` and `lance_filter` can be used together. A row must then
+match both. `filter` cannot be used with one of them.
 
 `lance_nd::datafusion` is the DataFusion version of Lance. Use it to build
 the filter. Older lance-nd releases cannot read a table with stats.
@@ -219,7 +245,7 @@ The main functions:
 | `write(uri, rows, &options)` | Create, append to or overwrite a table from a stream of nd record batches. |
 | `append(&mut table, rows, &options)` | Append a stream of nd record batches to an open table. |
 | `NdWriter::create` and `NdWriter::append` | Write nd record batches in several calls, then commit all of them in one version with `finish`. |
-| `scan(&table)` | Read nd record batches as a stream, with `project`, `filter`, `filter_expr` and `limit`. |
+| `scan(&table)` | Read nd record batches as a stream, with `project`, `filter`, `filter_expr`, `lance_filter` and `limit`. |
 | `variables(&table)` | List the array columns of the table. |
 | `column_defaults` and `set_column_defaults` | Read and change the encoding defaults for new columns. |
 

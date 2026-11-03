@@ -372,6 +372,7 @@ mod pruning {
     use futures::{TryStreamExt, stream};
     use lance::Dataset;
     use lance_nd::datafusion::common::ScalarValue;
+    use lance_nd::datafusion::functions::core::expr_fn::get_field;
     use lance_nd::datafusion::logical_expr::{Expr, col, lit};
     use lance_nd::{Error, NdScanner, NdWriter, WriteOptions, scan};
 
@@ -387,6 +388,11 @@ mod pruning {
             .await
             .unwrap();
         writer.finish().await.unwrap()
+    }
+
+    /// The values of `variable`: `<variable>.values`.
+    fn values_of(variable: &str) -> Expr {
+        get_field(col(variable), "values")
     }
 
     fn time(ns: i64) -> Expr {
@@ -442,7 +448,7 @@ mod pruning {
     async fn between_prunes() {
         let dir = tempfile::tempdir().unwrap();
         let dataset = table(&dir, ocean(), true).await;
-        let filter = col("lat").between(lit(17.5), lit(25.4));
+        let filter = values_of("lat").between(lit(17.5), lit(25.4));
         assert_eq!(ids(scan(&dataset).filter_expr(filter)).await, [2, 4]);
     }
 
@@ -450,10 +456,10 @@ mod pruning {
     async fn and_or_across_variables() {
         let dir = tempfile::tempdir().unwrap();
         let dataset = table(&dir, ocean(), true).await;
-        let filter = col("lat")
+        let filter = values_of("lat")
             .gt(lit(5.0))
-            .and(col("name").eq(lit("b")))
-            .or(col("time").lt(time(150)));
+            .and(values_of("name").eq(lit("b")))
+            .or(values_of("time").lt(time(150)));
         assert_eq!(ids(scan(&dataset).filter_expr(filter)).await, [0, 1, 2]);
     }
 
@@ -461,7 +467,7 @@ mod pruning {
     async fn absent_variable_is_skipped() {
         let dir = tempfile::tempdir().unwrap();
         let dataset = table(&dir, ocean(), true).await;
-        let filter = col("lat").gt_eq(lit(-100.0));
+        let filter = values_of("lat").gt_eq(lit(-100.0));
         assert_eq!(ids(scan(&dataset).filter_expr(filter)).await, [0, 1, 2, 4]);
     }
 
@@ -469,7 +475,7 @@ mod pruning {
     async fn all_nan_row_is_kept() {
         let dir = tempfile::tempdir().unwrap();
         let dataset = table(&dir, ocean(), true).await;
-        let filter = col("lat").gt(lit(1000.0));
+        let filter = values_of("lat").gt(lit(1000.0));
         assert_eq!(ids(scan(&dataset).filter_expr(filter)).await, [4]);
     }
 
@@ -477,9 +483,9 @@ mod pruning {
     async fn int_literal_on_float() {
         let dir = tempfile::tempdir().unwrap();
         let dataset = table(&dir, ocean(), true).await;
-        let filter = col("lat").gt(lit(17i32));
+        let filter = values_of("lat").gt(lit(17i32));
         assert_eq!(ids(scan(&dataset).filter_expr(filter)).await, [2, 4]);
-        let filter = col("id").lt(lit(1.5f64));
+        let filter = values_of("id").lt(lit(1.5f64));
         assert_eq!(ids(scan(&dataset).filter_expr(filter)).await, [0, 1]);
     }
 
@@ -487,7 +493,7 @@ mod pruning {
     async fn table_without_stats_keeps_all() {
         let dir = tempfile::tempdir().unwrap();
         let dataset = table(&dir, ocean(), false).await;
-        let filter = col("lat").gt(lit(1000.0));
+        let filter = values_of("lat").gt(lit(1000.0));
         assert_eq!(
             ids(scan(&dataset).filter_expr(filter)).await,
             [0, 1, 2, 3, 4]
@@ -500,7 +506,7 @@ mod pruning {
         let dataset = table(&dir, ocean(), true).await;
         let scanner = scan(&dataset)
             .filter("id > 1")
-            .filter_expr(col("lat").gt(lit(1.0)));
+            .filter_expr(values_of("lat").gt(lit(1.0)));
         assert!(matches!(
             scanner.try_into_stream().await.err(),
             Some(Error::InvalidArgument(_))
@@ -513,7 +519,7 @@ mod pruning {
         let dataset = table(&dir, ocean(), true).await;
         let rows: Vec<NdRecordBatch> = scan(&dataset)
             .project(&["id"])
-            .filter_expr(col("lat").between(lit(17.5), lit(25.4)))
+            .filter_expr(values_of("lat").between(lit(17.5), lit(25.4)))
             .try_into_stream()
             .await
             .unwrap()
@@ -547,11 +553,11 @@ mod pruning {
             .collect();
         let dataset = table(&dir, rows, true).await;
         for filter in [
-            col("x").eq(lit(0.0)),
-            col("x").eq(lit(-0.0)),
-            col("x").gt_eq(lit(0.0)),
-            col("x").lt_eq(lit(-0.0)),
-            col("x").eq(lit(0i32)),
+            values_of("x").eq(lit(0.0)),
+            values_of("x").eq(lit(-0.0)),
+            values_of("x").gt_eq(lit(0.0)),
+            values_of("x").lt_eq(lit(-0.0)),
+            values_of("x").eq(lit(0i32)),
         ] {
             assert_eq!(
                 ids(scan(&dataset).filter_expr(filter.clone())).await,
@@ -565,12 +571,16 @@ mod pruning {
     async fn uncastable_literal_keeps() {
         let dir = tempfile::tempdir().unwrap();
         let dataset = table(&dir, ocean(), true).await;
-        let filter = col("lat").gt(lit("abc")).or(col("name").eq(lit("a")));
+        let filter = values_of("lat")
+            .gt(lit("abc"))
+            .or(values_of("name").eq(lit("a")));
         assert_eq!(
             ids(scan(&dataset).filter_expr(filter)).await,
             [0, 1, 2, 3, 4]
         );
-        let filter = col("lat").eq(lit(true)).and(col("name").eq(lit("a")));
+        let filter = values_of("lat")
+            .eq(lit(true))
+            .and(values_of("name").eq(lit("a")));
         assert_eq!(ids(scan(&dataset).filter_expr(filter)).await, [0]);
     }
 
@@ -667,7 +677,7 @@ mod pruning {
     ) -> Filter {
         let a = pick(random);
         let b = pick(random);
-        let column = col(name);
+        let column = values_of(name);
         let (expr, test): (Expr, Test<T>) = match random.below(7) {
             0 => (column.eq(literal(&a)), Box::new(move |v| *v == a)),
             1 => (column.lt(literal(&a)), Box::new(move |v| *v < a)),

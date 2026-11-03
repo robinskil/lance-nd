@@ -8,7 +8,7 @@
 //! - [`write()`] and [`append()`]: write a stream of nd record batches.
 //! - [`NdWriter`]: write in several calls and commit once.
 //! - [`scan()`]: read a stream of nd record batches, with a projection.
-//! - [`prune`]: change a DataFusion filter on values into a filter on the stats.
+//! - [`prune`]: change a DataFusion filter on values and attributes into a filter on the stats.
 //! - [`stats`]: opt-in min and max values per variable and row, for pruning.
 //! - [`ColumnOptions`]: Lance encoding options, like the compression, per column.
 //!

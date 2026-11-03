@@ -243,6 +243,14 @@ The main functions:
 | `scan(&table)` | Read nd record batches as a stream, with `project`, `filter`, `filter_expr`, `lance_filter` and `limit`. |
 | `variables(&table)` | List the array columns of the table. |
 | `column_defaults` and `set_column_defaults` | Read and change the encoding defaults for new columns. |
+| `delete` and `delete_expr` | Delete the rows that match an exact predicate. |
+| `compact` and `cleanup_old_versions` | Merge small fragments, remove deleted rows and free disk space. |
+
+`project` takes whole variables, such as `temperature`, not nested fields
+such as `temperature.attrs.units`. Each row keeps all of its global
+attributes. An empty projection reads only the global attributes, one row
+without arrays for each table row. A filter can use nested fields, see
+[Filters](#filters).
 
 `project` takes whole variables, such as `temperature`, not nested fields
 such as `temperature.attrs.units`. Each row keeps all of its global
@@ -268,6 +276,37 @@ application, for example [mimalloc](https://crates.io/crates/mimalloc):
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 ```
+
+### Delete and compact
+
+Delete rows with an exact predicate on the table columns, then compact the
+table and remove the files of old versions:
+
+```rust
+use std::time::Duration;
+use lance_nd::{CompactOptions, cleanup_old_versions, compact, delete};
+
+let deleted = delete(&mut table, "__global_attrs__.id = 'a'").await?;
+compact(&mut table, &CompactOptions::default()).await?;
+cleanup_old_versions(&table, Duration::from_secs(7 * 24 * 60 * 60)).await?;
+```
+
+- `delete` takes Lance SQL, and `delete_expr` takes a DataFusion `Expr`.
+  Lance gets the predicate with no change. A delete does not use the stats,
+  because a stats filter keeps rows that do not match. A filter on values
+  must be exact, for example `array_has(sst.values, 5.0)`.
+- A delete marks rows in deletion files. It does not rewrite data files.
+- `compact` merges fragments smaller than about 128 MiB on disk, and writes
+  again each fragment with at least 10% deleted rows. `CompactOptions`
+  changes these limits. lance-nd holds one group of fragments in memory at
+  a time. The row order stays.
+- Each delete and compaction makes a new table version. The files of old
+  versions stay on disk until `cleanup_old_versions` removes them. A reader
+  that still uses a removed version fails, so keep a margin.
+
+lance-nd writes the compacted fragments itself. Lance reads the arrays of
+an absent variable as null, but it rejects these nulls in a write, so its
+own compaction fails on a lance-nd table.
 
 ## Python
 

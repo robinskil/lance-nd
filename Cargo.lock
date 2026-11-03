@@ -2873,6 +2873,7 @@ name = "lance-nd"
 version = "0.1.0"
 dependencies = [
  "arrow",
+ "chrono",
  "futures",
  "lance",
  "lance-core",

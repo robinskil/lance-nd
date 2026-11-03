@@ -1,5 +1,7 @@
 """Native classes of lance-nd."""
 
+import datetime
+
 import pyarrow as pa
 
 from lance_nd._typing import ColumnOptions, Mode
@@ -73,6 +75,35 @@ class Table:
 
     def variables(self) -> list[str]:
         """The names of the variables in the table."""
+
+    def delete(self, predicate: str) -> int:
+        """Delete the datasets that match ``predicate``, a Lance SQL filter.
+
+        Lance gets ``predicate`` with no change, so it must be exact for a
+        dataset, for example ``__global_attrs__.title = 'a'`` or
+        ``sst.attrs.units = 'K'``. Returns the number of deleted datasets.
+        """
+
+    def compact(
+        self,
+        target_fragment_bytes: int | None = None,
+        deleted_fraction: float | None = None,
+    ) -> dict[str, int]:
+        """Merge small fragments and remove deleted datasets.
+
+        A fragment smaller than about ``target_fragment_bytes`` on disk
+        (default 128 MiB) is merged with its neighbors. A fragment with at
+        least ``deleted_fraction`` deleted datasets (default 0.1) is written
+        again without them. Returns the counts ``fragments_removed``,
+        ``fragments_added``, ``files_removed`` and ``files_added``.
+        """
+
+    def cleanup_old_versions(self, older_than: datetime.timedelta = ...) -> dict[str, int]:
+        """Remove the files of the table versions older than ``older_than``.
+
+        The default is 14 days. The current version always stays. Returns
+        ``bytes_removed`` and ``old_versions``.
+        """
 
 def _scan_batch(uri: str) -> pa.RecordBatch:
     """The whole table as one nd-arrow record batch. For tests only."""

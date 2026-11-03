@@ -1,3 +1,5 @@
+from datetime import timedelta
+
 import numpy as np
 import pytest
 import xarray as xr
@@ -151,3 +153,40 @@ def test_fragment_options(table_uri):
     table = lance_nd.open(table_uri)
     assert table.num_fragments == 4
     assert table.count_rows() == 5
+
+
+def test_delete(table_uri):
+    with lance_nd.create(table_uri) as writer:
+        writer.write([dataset(title) for title in "abc"])
+    table = lance_nd.open(table_uri)
+    assert table.delete("__global_attrs__.title = 'b'") == 1
+    assert table.version == 2
+    assert table.delete("__global_attrs__.title = 'nope'") == 0
+    assert table.count_rows() == 2
+    assert lance_nd.open(table_uri).count_rows() == 2
+
+
+def test_delete_bad_predicate_raises(table_uri):
+    with lance_nd.create(table_uri) as writer:
+        writer.write(dataset("a"))
+    with pytest.raises(LanceNdError):
+        lance_nd.open(table_uri).delete("nope = 1")
+
+
+def test_compact_and_cleanup(table_uri):
+    with lance_nd.create(table_uri, target_fragment_bytes=1) as writer:
+        for title in "abcd":
+            writer.write(dataset(title))
+    table = lance_nd.open(table_uri)
+    assert table.num_fragments == 4
+    table.delete("__global_attrs__.title = 'a'")
+    metrics = table.compact()
+    assert metrics["fragments_removed"] == 3
+    assert metrics["fragments_added"] == 1
+    assert table.num_fragments == 1
+    assert table.count_rows() == 3
+    assert table.compact()["fragments_removed"] == 0
+    removed = table.cleanup_old_versions(timedelta(0))
+    assert removed["old_versions"] > 0
+    assert removed["bytes_removed"] > 0
+    assert lance_nd.open(table_uri).count_rows() == 3

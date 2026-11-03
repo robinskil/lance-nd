@@ -8,6 +8,8 @@
 //! - [`write()`] and [`append()`]: write a stream of nd record batches.
 //! - [`NdWriter`]: write in several calls and commit once.
 //! - [`scan()`]: read a stream of nd record batches, with a projection.
+//! - [`delete()`], [`compact()`] and [`cleanup_old_versions()`]: delete rows and
+//!   reclaim space, see [`maintenance`].
 //! - [`prune`]: change a DataFusion filter on values and attributes into a filter on the stats.
 //! - [`stats`]: opt-in min and max values per variable and row, for pruning.
 //! - [`ColumnOptions`]: Lance encoding options, like the compression, per column.
@@ -18,6 +20,7 @@
 
 pub mod encode;
 pub mod error;
+pub mod maintenance;
 pub mod options;
 pub mod prune;
 pub mod scan;
@@ -28,7 +31,10 @@ pub mod writer;
 
 pub use error::{Error, Result};
 pub use lance::dataset::WriteMode;
+pub use lance::dataset::cleanup::RemovalStats;
+pub use lance::dataset::optimize::CompactionMetrics;
 pub use lance::deps::datafusion;
+pub use maintenance::{CompactOptions, cleanup_old_versions, compact, delete, delete_expr};
 pub use options::{
     ByteStreamSplit, ColumnOptions, Compression, StructuralEncoding, column_defaults,
     set_column_defaults,

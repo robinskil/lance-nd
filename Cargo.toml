@@ -11,6 +11,7 @@ members = [".", "python"]
 
 [dependencies]
 arrow = { version = "58", default-features = false }
+chrono = { version = "0.4", default-features = false }
 futures = "0.3"
 lance = { version = "11", default-features = false }
 lance-core = "11"

@@ -7,6 +7,7 @@ use arrow::array::{
     new_empty_array, new_null_array,
 };
 use arrow::buffer::{NullBuffer, OffsetBuffer};
+use arrow::compute::{is_null, kernels::zip::zip};
 use arrow::datatypes::{DataType, Field, FieldRef, Fields, Schema, SchemaRef};
 
 use crate::error::{Error, Result};
@@ -139,6 +140,45 @@ fn conform(array: &ArrayRef, target: &Field) -> Result<ArrayRef> {
             "field '{}' has type {from} in the new rows and {to} in the table",
             target.name()
         ))),
+    }
+}
+
+/// `array` without nulls in the non-nullable fields of `field`.
+///
+/// Lance reads the children of a null struct row as null, but rejects nulls
+/// in a non-nullable field in a write. Each such null becomes the value of
+/// [`absent`], as a writer stores it.
+pub fn fill_hidden_nulls(array: &ArrayRef, field: &Field) -> Result<ArrayRef> {
+    let array = if !field.is_nullable() && array.null_count() > 0 {
+        let mask = is_null(array.as_ref())?;
+        zip(&mask, &absent(field, array.len())?, array)?
+    } else {
+        array.clone()
+    };
+    match field.data_type() {
+        DataType::Struct(fields) if !fields.is_empty() => {
+            let source = array.as_struct();
+            let children = fields
+                .iter()
+                .zip(source.columns())
+                .map(|(field, child)| fill_hidden_nulls(child, field))
+                .collect::<Result<Vec<_>>>()?;
+            Ok(Arc::new(StructArray::try_new(
+                fields.clone(),
+                children,
+                source.nulls().cloned(),
+            )?))
+        }
+        DataType::List(item) => {
+            let source = array.as_list::<i32>();
+            Ok(Arc::new(ListArray::try_new(
+                item.clone(),
+                source.offsets().clone(),
+                fill_hidden_nulls(source.values(), item)?,
+                source.nulls().cloned(),
+            )?))
+        }
+        _ => Ok(array),
     }
 }
 

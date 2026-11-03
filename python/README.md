@@ -137,6 +137,26 @@ A writer buffers datasets and writes them as Lance fragments of about
 `write_parallelism` to change these limits. `Table.num_fragments` gives
 the number of fragments.
 
+### Delete and compact
+
+```python
+from datetime import timedelta
+
+table = lance_nd.open("data/obs.lance")
+table.delete("__global_attrs__.title = 'old run'")
+table.compact()
+table.cleanup_old_versions(timedelta(days=7))
+```
+
+- `delete()` takes an exact Lance SQL filter and returns the number of
+  deleted datasets.
+- `compact()` merges small fragments and removes deleted datasets. It takes
+  `target_fragment_bytes` (default 128 MiB on disk) and `deleted_fraction`
+  (default 0.1).
+- `cleanup_old_versions()` removes the files of versions older than
+  `older_than` (default 14 days). Until then, deletes and compactions free
+  no disk space.
+
 ### Type hints
 
 The package has type hints and a `py.typed` marker. The stub

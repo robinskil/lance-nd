@@ -5,6 +5,7 @@
 
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
+use std::time::Duration;
 
 use arrow::array::RecordBatch;
 use arrow::pyarrow::PyArrowType;
@@ -12,8 +13,8 @@ use lance::Dataset;
 use lance_nd::encode::encode_rows;
 use lance_nd::stats::has_stats;
 use lance_nd::{
-    ByteStreamSplit, ColumnOptions, Compression, NdWriter, StructuralEncoding, WriteMode,
-    WriteOptions, scan, variables,
+    ByteStreamSplit, ColumnOptions, CompactOptions, Compression, NdWriter, StructuralEncoding,
+    WriteMode, WriteOptions, scan, variables,
 };
 use pyo3::create_exception;
 use pyo3::exceptions::{PyException, PyValueError};
@@ -211,6 +212,53 @@ impl Table {
     fn variables(&self) -> PyResult<Vec<String>> {
         let fields = variables(&self.dataset).map_err(to_py)?;
         Ok(fields.iter().map(|f| f.name().clone()).collect())
+    }
+
+    /// Delete the datasets that match `predicate`, a Lance SQL filter.
+    /// Returns the number of deleted datasets.
+    fn delete(&mut self, py: Python<'_>, predicate: String) -> PyResult<u64> {
+        block_on(py, lance_nd::delete(&mut self.dataset, &predicate)).map_err(to_py)
+    }
+
+    /// Merge small fragments and remove deleted datasets.
+    #[pyo3(signature = (target_fragment_bytes = None, deleted_fraction = None))]
+    fn compact(
+        &mut self,
+        py: Python<'_>,
+        target_fragment_bytes: Option<u64>,
+        deleted_fraction: Option<f32>,
+    ) -> PyResult<HashMap<&'static str, usize>> {
+        let defaults = CompactOptions::default();
+        let options = CompactOptions {
+            target_fragment_bytes: target_fragment_bytes.unwrap_or(defaults.target_fragment_bytes),
+            deleted_fraction: deleted_fraction.unwrap_or(defaults.deleted_fraction),
+        };
+        let metrics =
+            block_on(py, lance_nd::compact(&mut self.dataset, &options)).map_err(to_py)?;
+        Ok(HashMap::from([
+            ("fragments_removed", metrics.fragments_removed),
+            ("fragments_added", metrics.fragments_added),
+            ("files_removed", metrics.files_removed),
+            ("files_added", metrics.files_added),
+        ]))
+    }
+
+    /// Remove the files of the table versions older than `older_than`.
+    #[pyo3(signature = (older_than = Duration::from_secs(14 * 24 * 60 * 60)))]
+    fn cleanup_old_versions(
+        &self,
+        py: Python<'_>,
+        older_than: Duration,
+    ) -> PyResult<HashMap<&'static str, u64>> {
+        let stats = block_on(
+            py,
+            lance_nd::cleanup_old_versions(&self.dataset, older_than),
+        )
+        .map_err(to_py)?;
+        Ok(HashMap::from([
+            ("bytes_removed", stats.bytes_removed),
+            ("old_versions", stats.old_versions),
+        ]))
     }
 }
 

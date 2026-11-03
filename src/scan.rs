@@ -4,6 +4,7 @@ use arrow::datatypes::{Field, Schema};
 use futures::stream::{self, BoxStream};
 use futures::{StreamExt, TryStreamExt};
 use lance::Dataset;
+use lance::dataset::scanner::{MaterializationStyle, Scanner};
 use lance::deps::datafusion::logical_expr::Expr;
 use lance::table::format::Fragment;
 use lance_core::utils::tokio::{get_num_compute_intensive_cpus, spawn_cpu};
@@ -150,8 +151,42 @@ impl NdScanner<'_> {
         self
     }
 
+    /// The Lance plan of the scan, for example to see which columns the
+    /// filter read loads.
+    pub async fn explain_plan(&self, verbose: bool) -> Result<String> {
+        let (scanner, _) = self.lance_scanner()?;
+        Ok(scanner.explain_plan(verbose).await?)
+    }
+
     /// A stream of the selected rows, in table order.
     pub async fn try_into_stream(self) -> Result<BoxStream<'static, Result<NdRecordBatch>>> {
+        let (scanner, rows_only) = self.lance_scanner()?;
+        let parallelism = self
+            .decode_parallelism
+            .unwrap_or_else(get_num_compute_intensive_cpus);
+        let batches = scanner.try_into_stream().await?;
+        // Decode on the Lance CPU pool. `buffered` keeps the table order.
+        Ok(batches
+            .map(move |batch| async move {
+                let batch = match rows_only {
+                    true => batch?.project(&[])?,
+                    false => batch?,
+                };
+                spawn_cpu(move || {
+                    RowDecoder::try_new(&batch)?
+                        .into_rows()
+                        .collect::<Result<Vec<_>>>()
+                })
+                .await
+            })
+            .buffered(parallelism)
+            .map_ok(|rows| stream::iter(rows.into_iter().map(Ok)))
+            .try_flatten()
+            .boxed())
+    }
+
+    /// The Lance scanner, and `true` when it reads only row ids.
+    fn lance_scanner(&self) -> Result<(Scanner, bool)> {
         let mut scanner = self.dataset.scan();
         scanner.batch_size(self.batch_size);
         scanner.batch_size_bytes(self.batch_size_bytes);
@@ -183,8 +218,10 @@ impl NdScanner<'_> {
                 "a scan cannot have both filter and a DataFusion filter".to_string(),
             ));
         }
+        let mut filtered = false;
         if let Some(filter) = &self.filter {
             scanner.filter(filter)?;
+            filtered = true;
         }
         let pruned = match &self.filter_expr {
             Some(expr) => prune_filter(expr, &Schema::from(self.dataset.schema()))?,
@@ -196,6 +233,12 @@ impl NdScanner<'_> {
             .reduce(Expr::and)
         {
             scanner.filter_expr(expr);
+            filtered = true;
+        }
+        // Read the filter columns first, then the variables of the matching
+        // rows only. Lance reads a struct of lists early by default.
+        if filtered {
+            scanner.materialization_style(MaterializationStyle::AllLate);
         }
         if let Some(fragments) = &self.fragments {
             scanner.with_fragments(fragments.clone());
@@ -206,28 +249,7 @@ impl NdScanner<'_> {
         if let Some(rows) = self.batch_readahead {
             scanner.batch_readahead(rows);
         }
-        let parallelism = self
-            .decode_parallelism
-            .unwrap_or_else(get_num_compute_intensive_cpus);
-        let batches = scanner.try_into_stream().await?;
-        // Decode on the Lance CPU pool. `buffered` keeps the table order.
-        Ok(batches
-            .map(move |batch| async move {
-                let batch = match rows_only {
-                    true => batch?.project(&[])?,
-                    false => batch?,
-                };
-                spawn_cpu(move || {
-                    RowDecoder::try_new(&batch)?
-                        .into_rows()
-                        .collect::<Result<Vec<_>>>()
-                })
-                .await
-            })
-            .buffered(parallelism)
-            .map_ok(|rows| stream::iter(rows.into_iter().map(Ok)))
-            .try_flatten()
-            .boxed())
+        Ok((scanner, rows_only))
     }
 
     /// Collect the selected rows.

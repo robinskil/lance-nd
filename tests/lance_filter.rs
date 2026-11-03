@@ -180,3 +180,55 @@ async fn wrong_name_fails_in_the_scan() {
             .is_err()
     );
 }
+
+/// The columns of the first Lance read, the read that applies the filter.
+fn filter_read(plan: &str) -> String {
+    let line = plan
+        .lines()
+        .find(|line| line.contains("full_filter="))
+        .unwrap_or_else(|| panic!("no filter read in {plan}"));
+    let start = line.find("projection=[").expect("a projection") + "projection=[".len();
+    line[start..start + line[start..].find(']').unwrap()].to_string()
+}
+
+#[tokio::test]
+async fn filter_reads_variables_late() {
+    let dir = tempfile::tempdir().unwrap();
+    let dataset = table(&dir, true).await;
+    let scans = [
+        scan(&dataset)
+            .project(&["temp"])
+            .filter("__global_attrs__.station = 's3'"),
+        scan(&dataset)
+            .project(&["temp"])
+            .filter_expr(values("temp").gt(lit(35.0))),
+        scan(&dataset)
+            .project(&["temp"])
+            .lance_filter(station().eq(lit("s3"))),
+    ];
+    for scanner in scans {
+        let plan = scanner.explain_plan(true).await.unwrap();
+        let columns = filter_read(&plan);
+        assert!(!columns.contains("temp"), "{columns}\n{plan}");
+    }
+    let rows = scan(&dataset)
+        .project(&["temp"])
+        .filter("__global_attrs__.station = 'nope'")
+        .try_collect()
+        .await
+        .unwrap();
+    assert!(rows.is_empty());
+}
+
+#[tokio::test]
+async fn scan_without_filter_reads_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let dataset = table(&dir, true).await;
+    let plan = scan(&dataset)
+        .project(&["temp"])
+        .explain_plan(true)
+        .await
+        .unwrap();
+    assert_eq!(plan.matches("LanceRead").count(), 1, "{plan}");
+    assert!(plan.contains("temp"), "{plan}");
+}

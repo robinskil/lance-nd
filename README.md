@@ -195,6 +195,11 @@ Use one filter API for each case:
 `filter_expr` and `lance_filter` can be used together. A row must then
 match both. `filter` cannot be used with one of them.
 
+A scan with a filter first reads only the filter columns. Then it reads the
+projected variables of the matching rows only. So a filter that matches few
+rows reads little data. A filter that matches all rows is a little slower
+than a scan without a filter. `NdScanner::explain_plan` shows the reads.
+
 ### Column encoding
 
 Each column can have its own Lance encoding: compression, compression level,

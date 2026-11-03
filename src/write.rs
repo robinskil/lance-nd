@@ -42,6 +42,12 @@ pub struct WriteOptions {
     /// Only a new table or an overwrite reads it. An append writes stats
     /// when the table has them.
     pub stats: bool,
+    /// [`crate::NdWriter`] buffers rows until they have about this many
+    /// bytes in memory, then writes them as one Lance fragment. A larger
+    /// row gets a fragment of its own. [`write()`] ignores it.
+    pub target_fragment_bytes: usize,
+    /// The most fragments that [`crate::NdWriter`] writes at the same time.
+    pub write_parallelism: usize,
 }
 
 impl Default for WriteOptions {
@@ -53,6 +59,8 @@ impl Default for WriteOptions {
             column_defaults: None,
             column_options: HashMap::new(),
             stats: false,
+            target_fragment_bytes: 128 << 20,
+            write_parallelism: 4,
         }
     }
 }
@@ -148,7 +156,17 @@ pub(crate) fn encode_group(
     options: &WriteOptions,
     stats: bool,
 ) -> Result<RecordBatch> {
-    let mut batch = encode_rows(group)?;
+    prepare_batch(encode_rows(group)?, defaults, options, stats)
+}
+
+/// `batch` of nd columns with stats when `stats` is `true`, and with the
+/// encoding metadata of its columns.
+pub(crate) fn prepare_batch(
+    mut batch: RecordBatch,
+    defaults: &ColumnOptions,
+    options: &WriteOptions,
+    stats: bool,
+) -> Result<RecordBatch> {
     if stats {
         batch = add_stats(&batch)?;
     }

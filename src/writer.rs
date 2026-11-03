@@ -1,9 +1,11 @@
 //! Write nd record batches in several calls and commit them once.
 
+use std::collections::VecDeque;
 use std::pin::pin;
 use std::sync::Arc;
 
 use arrow::array::{RecordBatch, RecordBatchIterator};
+use arrow::compute::concat_batches;
 use arrow::datatypes::Schema;
 use futures::Stream;
 use lance::Dataset;
@@ -13,18 +15,28 @@ use lance::dataset::{CommitBuilder, WriteMode, WriteParams};
 use lance::table::format::Fragment;
 use lance_core::datatypes::{OnMissing, OnTypeMismatch, Schema as LanceSchema};
 use nd_arrow_array::NdRecordBatch;
+use tokio::task::JoinHandle;
 
+use crate::encode::RowDecoder;
 use crate::error::{Error, Result};
 use crate::options::ColumnOptions;
 use crate::schema::{conform_batch, merge_schemas};
+use crate::stats::STATS_FIELD;
 use crate::write::{
-    FILE_VERSION, WriteOptions, encode_group, next_group, table_defaults, table_has_stats,
+    FILE_VERSION, WriteOptions, encode_group, next_group, prepare_batch, table_defaults,
+    table_has_stats,
 };
 
 /// A writer that makes all its rows visible in one commit.
 ///
-/// [`NdWriter::write`] writes Lance data files, but readers do not see them.
-/// [`NdWriter::finish`] commits all of them in one new table version.
+/// [`NdWriter::write`] buffers rows. When the buffer has about
+/// [`WriteOptions::target_fragment_bytes`], a Tokio task writes it as one
+/// Lance fragment, and up to [`WriteOptions::write_parallelism`] fragments
+/// are written at the same time. Readers do not see the fragments.
+/// [`NdWriter::finish`] writes the rest and commits all of them in one new
+/// table version, in the order of the rows. The writer must run on a Tokio
+/// runtime.
+///
 /// A writer that is aborted or dropped commits nothing. Its data files stay
 /// until a Lance cleanup removes them.
 pub struct NdWriter {
@@ -39,6 +51,11 @@ pub struct NdWriter {
     options: WriteOptions,
     /// The table schema with all staged fields, as Arrow and as Lance.
     schema: Option<(Schema, LanceSchema)>,
+    /// Rows for the next fragment, and their size in memory.
+    buffer: Vec<RecordBatch>,
+    buffered_bytes: usize,
+    /// Fragment writes that run, in the order of their rows.
+    pending: VecDeque<JoinHandle<Result<Vec<Fragment>>>>,
     fragments: Vec<Fragment>,
     /// The error of a failed write. `finish` then fails too.
     failed: Option<String>,
@@ -72,6 +89,9 @@ impl NdWriter {
             stats: options.stats,
             options: options.clone(),
             schema: None,
+            buffer: Vec::new(),
+            buffered_bytes: 0,
+            pending: VecDeque::new(),
             fragments: Vec::new(),
             failed: None,
         })
@@ -94,23 +114,46 @@ impl NdWriter {
             stats,
             options: options.clone(),
             schema: Some(schema),
+            buffer: Vec::new(),
+            buffered_bytes: 0,
+            pending: VecDeque::new(),
             fragments: Vec::new(),
             failed: None,
         })
     }
 
-    /// Write a stream of rows as data files, without a commit.
-    /// Each nd record batch is one row.
+    /// Write a stream of rows, without a commit. Each nd record batch is one row.
     ///
     /// A failed write makes the writer fail: [`NdWriter::finish`] then
     /// commits nothing.
     pub async fn write(&mut self, rows: impl Stream<Item = Result<NdRecordBatch>>) -> Result<()> {
-        if let Some(error) = &self.failed {
-            return Err(Error::InvalidArgument(format!(
-                "an earlier write failed: {error}"
-            )));
-        }
+        self.check()?;
         let result = self.write_rows(rows).await;
+        self.fail_on(result)
+    }
+
+    /// Write the rows of an encoded record batch, without a commit.
+    ///
+    /// `batch` holds nd columns and an optional `__global_attrs__` column,
+    /// as [`crate::encode::encode_rows`] gives them. The writer checks the
+    /// columns, but it does not decode the rows. A failed write makes the
+    /// writer fail.
+    pub async fn write_batch(&mut self, batch: RecordBatch) -> Result<()> {
+        self.check()?;
+        let result = self.write_encoded(batch).await;
+        self.fail_on(result)
+    }
+
+    fn check(&self) -> Result<()> {
+        match &self.failed {
+            Some(error) => Err(Error::InvalidArgument(format!(
+                "an earlier write failed: {error}"
+            ))),
+            None => Ok(()),
+        }
+    }
+
+    fn fail_on(&mut self, result: Result<()>) -> Result<()> {
         if let Err(error) = &result {
             self.failed = Some(error.to_string());
         }
@@ -121,13 +164,29 @@ impl NdWriter {
         let mut rows = pin!(rows);
         while let Some(group) = next_group(&mut rows, &self.options).await? {
             let batch = encode_group(&group, &self.defaults, &self.options, self.stats)?;
-            self.write_batch(batch).await?;
+            self.push(batch).await?;
         }
         Ok(())
     }
 
-    /// Grow the staged schema, then write `batch` with its field ids.
-    async fn write_batch(&mut self, batch: RecordBatch) -> Result<()> {
+    async fn write_encoded(&mut self, batch: RecordBatch) -> Result<()> {
+        if batch.schema().column_with_name(STATS_FIELD).is_some() {
+            return Err(Error::SchemaMismatch(format!(
+                "variable name '{STATS_FIELD}' is reserved"
+            )));
+        }
+        // Fails for a column that is not an nd column or the global attributes.
+        RowDecoder::try_new(&batch)?;
+        if batch.num_rows() == 0 {
+            return Ok(());
+        }
+        let batch = prepare_batch(batch, &self.defaults, &self.options, self.stats)?;
+        self.push(batch).await
+    }
+
+    /// Grow the staged schema with `batch`, then buffer it. A full buffer
+    /// becomes a fragment.
+    async fn push(&mut self, batch: RecordBatch) -> Result<()> {
         let (arrow, lance) = match &self.schema {
             Some((arrow, lance)) => (
                 merge_schemas(arrow, &batch.schema())?,
@@ -140,30 +199,74 @@ impl NdWriter {
         };
         let mut lance = lance;
         lance.set_field_id(self.base_max_field_id());
-        // Only the columns of the batch: the other fields read as null.
+        self.schema = Some((arrow, lance));
+        self.buffered_bytes += batch.get_array_memory_size();
+        self.buffer.push(batch);
+        if self.buffered_bytes >= self.options.target_fragment_bytes {
+            self.flush().await?;
+        }
+        Ok(())
+    }
+
+    /// Start a fragment write of the buffer. Wait for the oldest write when
+    /// too many run.
+    async fn flush(&mut self) -> Result<()> {
+        if self.buffer.is_empty() {
+            return Ok(());
+        }
+        let batches = std::mem::take(&mut self.buffer);
+        self.buffered_bytes = 0;
+        let (arrow, lance) = self.schema.as_ref().expect("a buffered row has a schema");
+        // Only the columns of the buffered rows: the other fields read as null.
         let present: Vec<_> = arrow
             .fields()
             .iter()
-            .filter(|field| batch.schema().column_with_name(field.name()).is_some())
+            .filter(|field| {
+                batches
+                    .iter()
+                    .any(|b| b.schema().column_with_name(field.name()).is_some())
+            })
             .cloned()
             .collect();
         let present = Arc::new(Schema::new_with_metadata(present, arrow.metadata().clone()));
-        let batch = conform_batch(&batch, &present)?;
+        let batches = batches
+            .iter()
+            .map(|batch| conform_batch(batch, &present))
+            .collect::<Result<Vec<_>>>()?;
+        // One batch per fragment: Lance 11 fails to read back a fragment of
+        // several batches when a struct column has nulls and large lists.
+        let batch = concat_batches(&present, &batches)?;
         let projected =
             lance.project_by_schema(present.as_ref(), OnMissing::Error, OnTypeMismatch::Error)?;
-        let params = WriteParams {
-            mode: WriteMode::Append,
-            data_storage_version: Some(FILE_VERSION),
-            ..Default::default()
+        let uri = self.uri.clone();
+        self.pending.push_back(tokio::spawn(async move {
+            let params = WriteParams {
+                mode: WriteMode::Append,
+                data_storage_version: Some(FILE_VERSION),
+                ..Default::default()
+            };
+            let reader = RecordBatchIterator::new([Ok(batch)], present);
+            Ok(FragmentCreateBuilder::new(&uri)
+                .schema(&projected)
+                .write_params(&params)
+                .write_fragments(reader)
+                .await?)
+        }));
+        while self.pending.len() > self.options.write_parallelism.max(1) {
+            self.wait_oldest().await?;
+        }
+        Ok(())
+    }
+
+    /// Wait for the oldest fragment write and keep its fragments.
+    async fn wait_oldest(&mut self) -> Result<()> {
+        let Some(task) = self.pending.pop_front() else {
+            return Ok(());
         };
-        let reader = RecordBatchIterator::new([Ok(batch)], present);
-        let fragments = FragmentCreateBuilder::new(&self.uri)
-            .schema(&projected)
-            .write_params(&params)
-            .write_fragments(reader)
-            .await?;
+        let fragments = task.await.map_err(|error| {
+            Error::InvalidArgument(format!("a fragment write failed: {error}"))
+        })??;
         self.fragments.extend(fragments);
-        self.schema = Some((arrow, lance));
         Ok(())
     }
 
@@ -179,11 +282,15 @@ impl NdWriter {
     ///
     /// Without rows, a new table or an overwrite fails, and an append returns
     /// the table unchanged.
-    pub async fn finish(self) -> Result<Dataset> {
+    pub async fn finish(mut self) -> Result<Dataset> {
         if let Some(error) = self.failed {
             return Err(Error::InvalidArgument(format!(
                 "an earlier write failed, nothing is committed: {error}"
             )));
+        }
+        self.flush().await?;
+        while !self.pending.is_empty() {
+            self.wait_oldest().await?;
         }
         let Some((_, schema)) = self.schema.filter(|_| !self.fragments.is_empty()) else {
             return match (self.base, self.overwrite) {
@@ -251,8 +358,13 @@ impl NdWriter {
         Ok(dataset)
     }
 
-    /// Drop all written rows without a commit.
-    pub fn abort(self) {}
+    /// Drop all written rows without a commit. Stops the fragment writes
+    /// that run.
+    pub fn abort(self) {
+        for task in &self.pending {
+            task.abort();
+        }
+    }
 }
 
 /// Give the fragments ids from `first_id` on. Lance assigns ids only for appends.

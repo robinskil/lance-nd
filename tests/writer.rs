@@ -1,9 +1,12 @@
 use std::sync::Arc;
 
-use arrow::array::{Float32Array, Float64Array};
+use arrow::array::{Float32Array, Float64Array, Int32Array, RecordBatch};
 use arrow::datatypes::{DataType, Field, Schema};
+use futures::TryStreamExt;
 use futures::stream;
 use lance::Dataset;
+use lance_nd::encode::encode_rows;
+use lance_nd::stats::has_stats;
 use lance_nd::{Error, NdWriter, WriteMode, WriteOptions, scan, variables, write};
 use nd_arrow_array::{Attributes, Dimensions, NdArrowArray, NdRecordBatch};
 
@@ -337,4 +340,190 @@ async fn create_fails_when_another_writer_created_the_table() {
     let dataset = Dataset::open(&uri).await.unwrap();
     assert_eq!(dataset.version().version, 1);
     assert_eq!(dataset.count_rows(None).await.unwrap(), 1);
+}
+
+/// Write each row in its own `write` call, then commit.
+async fn write_one_by_one(
+    uri: &str,
+    batches: Vec<NdRecordBatch>,
+    options: &WriteOptions,
+) -> Dataset {
+    let mut writer = NdWriter::create(uri, options).await.unwrap();
+    for batch in batches {
+        writer.write(rows(vec![batch])).await.unwrap();
+    }
+    writer.finish().await.unwrap()
+}
+
+async fn read_all(dataset: &Dataset) -> Vec<NdRecordBatch> {
+    scan(dataset)
+        .try_into_stream()
+        .await
+        .unwrap()
+        .try_collect()
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn small_writes_share_one_fragment() {
+    let dir = tempfile::tempdir().unwrap();
+    let batches = (1..=20).map(|i| sst(i, "a")).collect();
+    let dataset = write_one_by_one(&uri(&dir), batches, &WriteOptions::default()).await;
+    assert_eq!(dataset.get_fragments().len(), 1);
+    assert_eq!(dataset.count_rows(None).await.unwrap(), 20);
+}
+
+#[tokio::test]
+async fn target_bytes_splits_fragments() {
+    let dir = tempfile::tempdir().unwrap();
+    let options = WriteOptions {
+        target_fragment_bytes: 1,
+        ..Default::default()
+    };
+    let batches = (1..=20).map(|i| sst(i, "a")).collect();
+    let dataset = write_one_by_one(&uri(&dir), batches, &options).await;
+    assert_eq!(dataset.get_fragments().len(), 20);
+}
+
+#[tokio::test]
+async fn parallel_writes_keep_row_order() {
+    let dir = tempfile::tempdir().unwrap();
+    let options = WriteOptions {
+        target_fragment_bytes: 1,
+        write_parallelism: 4,
+        ..Default::default()
+    };
+    let batches = (1..=40).map(|i| sst(i, "a")).collect();
+    let dataset = write_one_by_one(&uri(&dir), batches, &options).await;
+    let lengths: Vec<usize> = read_all(&dataset)
+        .await
+        .iter()
+        .map(|row| row.column_by_name("sst").unwrap().len())
+        .collect();
+    assert_eq!(lengths, (1..=40).collect::<Vec<_>>());
+}
+
+#[tokio::test]
+async fn buffered_rows_with_other_variables() {
+    let dir = tempfile::tempdir().unwrap();
+    let batches = vec![sst(2, "a"), station_var("pressure"), sst(3, "b")];
+    let dataset = write_one_by_one(&uri(&dir), batches, &WriteOptions::default()).await;
+    assert_eq!(dataset.get_fragments().len(), 1);
+    let names: Vec<Vec<String>> = read_all(&dataset)
+        .await
+        .iter()
+        .map(|row| {
+            row.schema()
+                .fields()
+                .iter()
+                .map(|f| f.name().clone())
+                .collect()
+        })
+        .collect();
+    assert_eq!(names, [vec!["sst"], vec!["pressure"], vec!["sst"]]);
+}
+
+#[tokio::test]
+async fn write_batch_takes_encoded_rows() {
+    let dir = tempfile::tempdir().unwrap();
+    let options = WriteOptions {
+        stats: true,
+        ..Default::default()
+    };
+    let mut writer = NdWriter::create(&uri(&dir), &options).await.unwrap();
+    let batch = encode_rows(&[sst(2, "a"), station_var("pressure")]).unwrap();
+    writer.write_batch(batch).await.unwrap();
+    writer.write(rows(vec![sst(4, "b")])).await.unwrap();
+    let dataset = writer.finish().await.unwrap();
+    assert!(has_stats(&Schema::from(dataset.schema())));
+    assert!(dataset.schema().field("__stats__").is_some());
+    let read = read_all(&dataset).await;
+    assert_eq!(read.len(), 3);
+    assert_eq!(read[0].column_by_name("sst").unwrap().len(), 2);
+    assert!(read[1].column_by_name("sst").is_none());
+    assert_eq!(read[2].column_by_name("sst").unwrap().len(), 4);
+}
+
+#[tokio::test]
+async fn write_batch_rejects_bad_columns() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut writer = NdWriter::create(&uri(&dir), &WriteOptions::default())
+        .await
+        .unwrap();
+    let plain = RecordBatch::try_new(
+        Arc::new(Schema::new(vec![Field::new("x", DataType::Int32, true)])),
+        vec![Arc::new(Int32Array::from(vec![1]))],
+    )
+    .unwrap();
+    assert!(writer.write_batch(plain).await.is_err());
+
+    let mut writer = NdWriter::create(&uri(&dir), &WriteOptions::default())
+        .await
+        .unwrap();
+    let encoded = encode_rows(&[sst(2, "a")]).unwrap();
+    let mut fields: Vec<Field> = encoded
+        .schema()
+        .fields()
+        .iter()
+        .map(|f| f.as_ref().clone())
+        .collect();
+    let mut columns = encoded.columns().to_vec();
+    fields.push(fields[0].clone().with_name("__stats__"));
+    columns.push(columns[0].clone());
+    let reserved = RecordBatch::try_new(Arc::new(Schema::new(fields)), columns).unwrap();
+    assert!(writer.write_batch(reserved).await.is_err());
+}
+
+/// A `(prof, level)` Float32 variable `psal` with nulls in its values.
+fn psal(levels: usize) -> NdRecordBatch {
+    let schema = Arc::new(Schema::new(vec![Field::new(
+        "psal",
+        DataType::Float32,
+        true,
+    )]));
+    let values = (0..20 * levels).map(|i| (i % 7 != 0).then_some(i as f32));
+    let array = NdArrowArray::try_new(
+        Arc::new(Float32Array::from_iter(values)),
+        Dimensions::try_new([("prof", 20), ("level", levels)]).unwrap(),
+    )
+    .unwrap();
+    NdRecordBatch::try_new_inferred(schema, vec![array]).unwrap()
+}
+
+#[tokio::test]
+async fn absent_large_variable_in_buffered_batches() {
+    let dir = tempfile::tempdir().unwrap();
+    let batches = (0..40)
+        .map(|i| {
+            if i == 0 {
+                station_var("pressure")
+            } else {
+                psal(5000 + i)
+            }
+        })
+        .collect();
+    let dataset = write_one_by_one(&uri(&dir), batches, &WriteOptions::default()).await;
+    assert_eq!(dataset.get_fragments().len(), 1);
+    let read = read_all(&dataset).await;
+    assert_eq!(read.len(), 40);
+    assert!(read[0].column_by_name("psal").is_none());
+    assert_eq!(read[1].column_by_name("psal").unwrap().len(), 20 * 5001);
+}
+
+#[tokio::test]
+async fn absent_variable_in_a_fragment_of_many_rows() {
+    let dir = tempfile::tempdir().unwrap();
+    let batches = (0..2000)
+        .map(|i| {
+            if i % 500 == 0 {
+                station_var("pressure")
+            } else {
+                psal(100 + i % 7)
+            }
+        })
+        .collect();
+    let dataset = write_one_by_one(&uri(&dir), batches, &WriteOptions::default()).await;
+    assert_eq!(dataset.get_fragments().len(), 1);
+    assert_eq!(read_all(&dataset).await.len(), 2000);
 }

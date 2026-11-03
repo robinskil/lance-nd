@@ -239,7 +239,7 @@ The main functions:
 |---|---|
 | `write(uri, rows, &options)` | Create, append to or overwrite a table from a stream of nd record batches. |
 | `append(&mut table, rows, &options)` | Append a stream of nd record batches to an open table. |
-| `NdWriter::create` and `NdWriter::append` | Write nd record batches in several calls, then commit all of them in one version with `finish`. |
+| `NdWriter::create` and `NdWriter::append` | Write nd record batches in several calls, then commit all of them in one version with `finish`. `write_batch` takes rows that are already encoded. |
 | `scan(&table)` | Read nd record batches as a stream, with `project`, `filter`, `filter_expr`, `lance_filter` and `limit`. |
 | `variables(&table)` | List the array columns of the table. |
 | `column_defaults` and `set_column_defaults` | Read and change the encoding defaults for new columns. |
@@ -247,6 +247,21 @@ The main functions:
 Rows can be large, so a scan reads Lance batches of at most 256 rows or about
 32 MiB, and it decodes them in parallel. `batch_size`, `batch_size_bytes`,
 `batch_readahead` and `decode_parallelism` change these limits.
+
+`NdWriter` buffers rows and writes them as Lance fragments of about 128 MiB
+in memory, with up to 4 fragment writes at the same time. A larger row gets
+a fragment of its own. `WriteOptions::target_fragment_bytes` and
+`WriteOptions::write_parallelism` change these limits. The writer must run
+on a Tokio runtime.
+
+Scans and writes allocate many large buffers. On Windows, the system
+allocator makes them much slower. Set a faster global allocator in your
+application, for example [mimalloc](https://crates.io/crates/mimalloc):
+
+```rust
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+```
 
 ## Python
 

@@ -33,3 +33,6 @@ __pycache__/
 
 # Superpowers design docs
 docs/superpowers/
+
+# Local test data and scripts
+testdata/

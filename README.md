@@ -20,7 +20,7 @@
 
 <p align="center">
   <a href="#overview">Overview</a> ·
-  <a href="#the-nd-arrow-encoding">nd-arrow encoding</a> ·
+  <a href="#data-model">Data model</a> ·
   <a href="#the-lance-nd-table">lance-nd table</a> ·
   <a href="#usage">Usage</a> ·
   <a href="#python">Python</a> ·
@@ -42,61 +42,33 @@ lance-nd is a general way to store N-dimensional array data in a
 The Lance table schema **is** the nd-arrow encoding. lance-nd adds no extra
 columns and no private layout, so any Arrow or Lance reader can read the data.
 The one exception is opt-in: a table with stats has one extra `__stats__`
-column, see [Stats and pruning](#stats-and-pruning).
+column, see [Stats](#stats).
 
-## The nd-arrow encoding
+## Data model
 
-### nd arrow arrays
+lance-nd stores the data model of
+[nd-arrow-array](https://github.com/robinskil/nd-arrow-array). That repo
+defines the encoding. In short:
 
-An nd arrow array is one N-dimensional array. As an Arrow column, it is the
-extension type `nd_arrow.array` over a struct, and each row holds one complete
-nd arrow array:
+- An **nd arrow array** is one N-dimensional array. As an Arrow column, it
+  is the extension type `nd_arrow.array` over a struct:
 
-```text
-Struct {
-  values:    List<T>,       // the flat values, in C order
-  dim_names: List<Utf8>,    // the name of each dimension
-  dim_sizes: List<UInt32>,  // the size of each dimension
-  attrs:     Struct { .. }, // optional attributes, such as units
-}
-```
+  ```text
+  Struct {
+    values:    List<T>,       // the flat values, in C order
+    dim_names: List<Utf8>,    // the name of each dimension
+    dim_sizes: List<UInt32>,  // the size of each dimension
+    attrs:     Struct { .. }, // optional attributes, such as units
+  }
+  ```
 
-For example, an `(x=2, y=3)` array of `Float64` with `units = "K"`:
+- An **nd record batch** is a set of named nd arrow arrays on one shared
+  grid, plus optional global attributes in the struct column
+  `__global_attrs__`.
 
-```text
-values:    [0.0, 0.1, 0.2, 1.0, 1.1, 1.2]
-dim_names: ["x", "y"]
-dim_sizes: [2, 3]
-attrs:     { units: "K" }
-```
-
-The element at `(x=1, y=2)` is at flat position `1 * 3 + 2 = 5`, so its value
-is `1.2`.
-
-Rules:
-
-- The rows of one column can have different shapes and dimensions.
-- An nd arrow array with no dimensions is a scalar with one value.
-- Nulls in the `values` items mark missing elements. The format has no fill
-  value and no separate mask.
-- `attrs` has one child field per attribute key. A null child means that the
-  array does not have that key. One key has one type in a column.
-
-### nd record batches
-
-An nd record batch is a set of named nd arrow arrays on one shared grid, plus
-optional global attributes. As Arrow data, it is a record batch of nd columns:
-
-- Each nd column holds one named nd arrow array, for example `x`, `y` or
-  `temperature`.
-- The arrays broadcast onto one grid. An array can use a subset of the grid
-  dimensions: a coordinate array uses one, and a scalar uses none.
-- The format does not store the grid. A reader infers it from the arrays.
-- Global attributes describe the whole nd record batch. They are in one extra
-  struct column, `__global_attrs__`.
-
-In Rust, these are `NdArrowArray` and `NdRecordBatch` from
-[nd-arrow-array](https://github.com/robinskil/nd-arrow-array).
+In Rust, these are `NdArrowArray` and `NdRecordBatch`. See the
+[nd-arrow FORMAT.md](https://github.com/robinskil/nd-arrow-array/blob/main/FORMAT.md)
+for the full rules.
 
 ## The lance-nd table
 
@@ -143,16 +115,49 @@ attributes, for example `id` or `chunk_offset`, then filter on them:
 __global_attrs__.id = 'a'
 ```
 
-### Stats and pruning
+### Stats
 
 A table created with `WriteOptions { stats: true, .. }` stores the min and the
-max of each variable per row, in one extra `__stats__` column. Null and NaN
+max of each variable per row, in one extra `__stats__` column. It has one
+child per variable, `__stats__.<variable>.min` and `.max`. Null and NaN
 values do not count. Numeric, string, timestamp, date, time and duration
 variables get stats. An append writes stats when the table has them.
 
-A scan can then skip the rows that surely have no matching value. Give it a
-DataFusion filter on the table columns. The values of a variable are the
-column path `<variable>.values`:
+`lance_nd::datafusion` is the DataFusion version of Lance. Use it to build
+filters. Older lance-nd releases cannot read a table with stats.
+
+### Pruning
+
+A scan with `filter_expr` uses the stats to skip the rows that surely have no
+matching value. lance-nd changes each part of the filter that reads
+`<variable>.values` into a test on the min and the max of the row:
+
+| Filter on the values | Filter on the stats |
+|---|---|
+| `v = x` | `min <= x AND max >= x` |
+| `v < x`, `v <= x` | `min < x`, `min <= x` |
+| `v > x`, `v >= x` | `max > x`, `max >= x` |
+| `v BETWEEN a AND b` | `max >= a AND min <= b` |
+| `v IN (x, y)` | The `=` test for each value, joined with `OR` |
+
+Then Lance reads only the rows that pass the stats test. For example, with
+the filter `lat.values BETWEEN 17.5 AND 25.4`:
+
+| Row | `lat` min | `lat` max | Result |
+|---|---|---|---|
+| 0 | -90 | -80 | skipped |
+| 1 | 17 | 30 | kept |
+| 2 | absent | absent | skipped: the row does not have `lat` |
+| 3 | null | null | kept: no value counts, for example all NaN |
+
+- A kept row comes back whole. It can hold values outside the filter.
+- A value part without a stats form keeps all rows, for example `NOT`,
+  `!=` or `t.values * 2 > 10`.
+- A table without stats keeps all rows for a value part.
+
+### Filters
+
+A filter for `filter_expr` uses the Lance table columns:
 
 ```rust
 use lance_nd::datafusion::functions::core::expr_fn::get_field;
@@ -160,8 +165,9 @@ use lance_nd::datafusion::prelude::{col, lit};
 
 let lat = get_field(col("lat"), "values");
 let units = get_field(get_field(col("sst"), "attrs"), "units");
+let id = get_field(col("__global_attrs__"), "id");
 let rows = scan(&table)
-    .filter_expr(lat.between(lit(17.5), lit(25.4)).and(units.eq(lit("K"))))
+    .filter_expr(lat.between(lit(17.5), lit(25.4)).and(units.eq(lit("K")).or(id.eq(lit("a")))))
     .try_into_stream()
     .await?;
 ```
@@ -170,17 +176,9 @@ lance-nd does not check or change the column names. A wrong name gives an
 error in the scan. In an `Expr`, write a nested column such as `sst.values`
 with `get_field`: Lance does not resolve `col("sst.values")`.
 
-- The filter supports `=`, `<`, `<=`, `>`, `>=`, `between` and `in`, with a
-  literal, and `AND` and `OR` of these.
-- A kept row comes back whole. It can hold values outside the filter.
-- A value part without a stats form keeps all rows, for example `NOT`,
-  `!=` or `t.values * 2 > 10`.
-- A row without the variable does not match.
-- A table without stats keeps all rows.
-
-A part that does not read values, for example on
-`__global_attrs__.id` or `sst.attrs.units`, filters the rows exactly, so it
-stays as it is:
+A part that does not read values, for example on `__global_attrs__.id` or
+`sst.attrs.units`, filters the rows exactly, so it stays as it is. Parts
+combine with these rules:
 
 - `AND`: a side without a stats form goes away.
 - `OR`: both sides need a form, or the full `OR` keeps all rows.
@@ -196,9 +194,6 @@ Use one filter API for each case:
 
 `filter_expr` and `lance_filter` can be used together. A row must then
 match both. `filter` cannot be used with one of them.
-
-`lance_nd::datafusion` is the DataFusion version of Lance. Use it to build
-the filter. Older lance-nd releases cannot read a table with stats.
 
 ### Column encoding
 

@@ -11,9 +11,13 @@ use std::cmp::Ordering;
 use std::sync::Arc;
 
 use arrow::array::{
-    Array, ArrayRef, AsArray, RecordBatch, StructArray, UInt64Array, make_comparator,
+    Array, ArrayRef, AsArray, PrimitiveArray, RecordBatch, StringArray, StructArray, UInt64Array,
+    downcast_primitive_array, make_comparator, new_empty_array, new_null_array,
 };
-use arrow::compute::{SortOptions, take};
+use arrow::compute::kernels::aggregate::{
+    max, max_string, max_string_view, min, min_string, min_string_view,
+};
+use arrow::compute::{SortOptions, cast, concat, take};
 use arrow::datatypes::{
     ArrowPrimitiveType, DataType, Field, Fields, Float16Type, Float32Type, Float64Type, Schema,
 };
@@ -103,30 +107,113 @@ pub fn add_stats(batch: &RecordBatch) -> Result<RecordBatch> {
 /// The min and the max of each row of an nd column. An absent row and a row
 /// without counted values give nulls.
 fn min_max(nd: &StructArray, offsets: &[i32], values: &dyn Array) -> Result<(ArrayRef, ArrayRef)> {
-    let compare = make_comparator(values, values, SortOptions::default())?;
-    let mut min = Vec::with_capacity(nd.len());
-    let mut max = Vec::with_capacity(nd.len());
+    let mut mins: Vec<ArrayRef> = Vec::with_capacity(nd.len());
+    let mut maxs: Vec<ArrayRef> = Vec::with_capacity(nd.len());
     for row in 0..nd.len() {
-        let mut low: Option<usize> = None;
-        let mut high: Option<usize> = None;
-        if nd.is_valid(row) {
+        let (min, max) = if nd.is_valid(row) {
             let start = offsets[row] as usize;
             let end = offsets[row + 1] as usize;
-            for i in (start..end).filter(|&i| values.is_valid(i) && !is_nan(values, i)) {
-                if low.is_none_or(|l| compare(i, l) == Ordering::Less) {
-                    low = Some(i);
-                }
-                if high.is_none_or(|h| compare(i, h) == Ordering::Greater) {
-                    high = Some(i);
-                }
-            }
-        }
-        min.push(low.map(|i| i as u64));
-        max.push(high.map(|i| i as u64));
+            row_bounds(values.slice(start, end - start).as_ref())?
+        } else {
+            let null = new_null_array(values.data_type(), 1);
+            (null.clone(), null)
+        };
+        mins.push(min);
+        maxs.push(max);
     }
-    let min = take(values, &UInt64Array::from(min), None)?;
-    let max = take(values, &UInt64Array::from(max), None)?;
+    let min = join(&mins, values.data_type())?;
+    let max = join(&maxs, values.data_type())?;
     Ok((widen_zero(&min, -0.0), widen_zero(&max, 0.0)))
+}
+
+fn join(arrays: &[ArrayRef], data_type: &DataType) -> Result<ArrayRef> {
+    if arrays.is_empty() {
+        return Ok(new_empty_array(data_type));
+    }
+    let arrays: Vec<&dyn Array> = arrays.iter().map(|a| a.as_ref()).collect();
+    Ok(concat(&arrays)?)
+}
+
+/// The min and the max of the values of one row, as arrays of one value.
+fn row_bounds(values: &dyn Array) -> Result<(ArrayRef, ArrayRef)> {
+    let data_type = values.data_type().clone();
+    // The kernels skip nulls but count NaN, so a NaN result takes the slow path.
+    let fast: Option<(ArrayRef, ArrayRef)> = downcast_primitive_array!(
+        values => {
+            let (low, high) = (min(values), max(values));
+            (!is_nan(low) && !is_nan(high))
+                .then(|| (one(values, low, &data_type), one(values, high, &data_type)))
+        }
+        DataType::Utf8 => {
+            let values = values.as_string::<i32>();
+            Some(strings(min_string(values), max_string(values)))
+        }
+        DataType::LargeUtf8 => {
+            let values = values.as_string::<i64>();
+            Some(strings(min_string(values), max_string(values)))
+        }
+        DataType::Utf8View => {
+            let values = values.as_string_view();
+            Some(strings(min_string_view(values), max_string_view(values)))
+        }
+        _ => None
+    );
+    match fast {
+        Some(bounds) => {
+            let (low, high) = bounds;
+            Ok((cast(&low, &data_type)?, cast(&high, &data_type)?))
+        }
+        None => compared_bounds(values),
+    }
+}
+
+/// `true` for a NaN. Only a NaN is not equal to itself.
+#[allow(clippy::eq_op)]
+fn is_nan<T: PartialEq>(value: Option<T>) -> bool {
+    value.is_some_and(|v| v != v)
+}
+
+/// An array of `value`, of the type of `like`.
+fn one<T: ArrowPrimitiveType>(
+    _like: &PrimitiveArray<T>,
+    value: Option<T::Native>,
+    data_type: &DataType,
+) -> ArrayRef {
+    let array: PrimitiveArray<T> = [value].into_iter().collect();
+    Arc::new(array.with_data_type(data_type.clone()))
+}
+
+fn strings(low: Option<&str>, high: Option<&str>) -> (ArrayRef, ArrayRef) {
+    (
+        Arc::new(StringArray::from(vec![low])),
+        Arc::new(StringArray::from(vec![high])),
+    )
+}
+
+/// The bounds of `values` by comparison, without null and NaN values.
+fn compared_bounds(values: &dyn Array) -> Result<(ArrayRef, ArrayRef)> {
+    let compare = make_comparator(values, values, SortOptions::default())?;
+    let mut low: Option<usize> = None;
+    let mut high: Option<usize> = None;
+    for i in (0..values.len()).filter(|&i| values.is_valid(i) && !is_nan_at(values, i)) {
+        if low.is_none_or(|l| compare(i, l) == Ordering::Less) {
+            low = Some(i);
+        }
+        if high.is_none_or(|h| compare(i, h) == Ordering::Greater) {
+            high = Some(i);
+        }
+    }
+    let low = take(
+        values,
+        &UInt64Array::from(vec![low.map(|i| i as u64)]),
+        None,
+    )?;
+    let high = take(
+        values,
+        &UInt64Array::from(vec![high.map(|i| i as u64)]),
+        None,
+    )?;
+    Ok((low, high))
 }
 
 /// `bounds` with each zero as `zero`. Total order puts -0.0 below 0.0, but a
@@ -155,7 +242,7 @@ fn widen_zero(bounds: &ArrayRef, zero: f64) -> ArrayRef {
     }
 }
 
-fn is_nan(values: &dyn Array, i: usize) -> bool {
+fn is_nan_at(values: &dyn Array, i: usize) -> bool {
     match values.data_type() {
         DataType::Float16 => values.as_primitive::<Float16Type>().value(i).is_nan(),
         DataType::Float32 => values.as_primitive::<Float32Type>().value(i).is_nan(),

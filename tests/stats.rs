@@ -94,6 +94,23 @@ fn nan_and_all_null() {
 }
 
 #[test]
+fn negative_nan_and_large_rows() {
+    let mut big: Vec<Option<f64>> = (0..10_000).map(|i| Some(i as f64)).collect();
+    big[17] = Some(-f64::NAN);
+    big[18] = None;
+    let batch = stats_of(&[
+        row(vec![(
+            "v",
+            Arc::new(Float64Array::from(vec![-f64::NAN, 1.0, 2.0])),
+        )]),
+        row(vec![("v", Arc::new(Float64Array::from(big)))]),
+    ]);
+    let (min, max) = min_max(child(&batch, "v"));
+    assert_eq!(min.as_primitive::<Float64Type>().values(), &[1.0, 0.0]);
+    assert_eq!(max.as_primitive::<Float64Type>().values(), &[2.0, 9999.0]);
+}
+
+#[test]
 fn absent_variable_is_null_child() {
     let batch = stats_of(&[
         row(vec![(

@@ -68,7 +68,11 @@ pub struct NdScanner<'a> {
 
 impl NdScanner<'_> {
     /// Read only these variables. A row keeps its global attributes.
-    /// A row without any of these variables gives a batch without columns.
+    /// A row without any of these variables gives a batch without columns,
+    /// so an empty list reads only the global attributes.
+    ///
+    /// Each name must be a whole variable. A nested field, such as
+    /// `sst.attrs.units`, gives [`Error::InvalidArgument`] in the scan.
     pub fn project(mut self, variables: &[&str]) -> Self {
         self.projection = Some(variables.iter().map(|v| v.to_string()).collect());
         self
@@ -151,18 +155,26 @@ impl NdScanner<'_> {
         let mut scanner = self.dataset.scan();
         scanner.batch_size(self.batch_size);
         scanner.batch_size_bytes(self.batch_size_bytes);
+        let mut rows_only = false;
         if let Some(projection) = &self.projection {
             let schema = self.dataset.schema();
-            if let Some(unknown) = projection.iter().find(|v| {
-                *v == GLOBAL_ATTRIBUTES_FIELD || *v == STATS_FIELD || schema.field(v).is_none()
-            }) {
+            let is_column = |name: &str| schema.fields.iter().any(|f| f.name == name);
+            if let Some(unknown) = projection
+                .iter()
+                .find(|v| *v == GLOBAL_ATTRIBUTES_FIELD || *v == STATS_FIELD || !is_column(v))
+            {
                 return Err(Error::InvalidArgument(format!(
-                    "'{unknown}' is not a variable of the table"
+                    "'{unknown}' is not a variable of the table: a projection takes whole variables, not nested fields"
                 )));
             }
             let mut columns = projection.clone();
-            if schema.field(GLOBAL_ATTRIBUTES_FIELD).is_some() {
+            if is_column(GLOBAL_ATTRIBUTES_FIELD) {
                 columns.push(GLOBAL_ATTRIBUTES_FIELD.to_string());
+            }
+            // Lance needs one column, so read the row ids and drop them.
+            rows_only = columns.is_empty();
+            if rows_only {
+                scanner.with_row_id();
             }
             scanner.project(&columns)?;
         }
@@ -200,8 +212,11 @@ impl NdScanner<'_> {
         let batches = scanner.try_into_stream().await?;
         // Decode on the Lance CPU pool. `buffered` keeps the table order.
         Ok(batches
-            .map(|batch| async move {
-                let batch = batch?;
+            .map(move |batch| async move {
+                let batch = match rows_only {
+                    true => batch?.project(&[])?,
+                    false => batch?,
+                };
                 spawn_cpu(move || {
                     RowDecoder::try_new(&batch)?
                         .into_rows()

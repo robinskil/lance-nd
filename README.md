@@ -244,6 +244,12 @@ The main functions:
 | `variables(&table)` | List the array columns of the table. |
 | `column_defaults` and `set_column_defaults` | Read and change the encoding defaults for new columns. |
 
+`project` takes whole variables, such as `temperature`, not nested fields
+such as `temperature.attrs.units`. Each row keeps all of its global
+attributes. An empty projection reads only the global attributes, one row
+without arrays for each table row. A filter can use nested fields, see
+[Filters](#filters).
+
 Rows can be large, so a scan reads Lance batches of at most 256 rows or about
 32 MiB, and it decodes them in parallel. `batch_size`, `batch_size_bytes`,
 `batch_readahead` and `decode_parallelism` change these limits.

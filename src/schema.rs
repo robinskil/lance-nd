@@ -3,7 +3,8 @@
 use std::sync::Arc;
 
 use arrow::array::{
-    Array, ArrayRef, AsArray, ListArray, RecordBatch, StructArray, new_empty_array, new_null_array,
+    Array, ArrayRef, AsArray, ListArray, RecordBatch, RecordBatchOptions, StructArray,
+    new_empty_array, new_null_array,
 };
 use arrow::buffer::{NullBuffer, OffsetBuffer};
 use arrow::datatypes::{DataType, Field, FieldRef, Fields, Schema, SchemaRef};
@@ -93,7 +94,12 @@ pub fn conform_batch(batch: &RecordBatch, schema: &SchemaRef) -> Result<RecordBa
             None => absent(field, batch.num_rows()),
         })
         .collect::<Result<Vec<_>>>()?;
-    Ok(RecordBatch::try_new(schema.clone(), columns)?)
+    let options = RecordBatchOptions::new().with_row_count(Some(batch.num_rows()));
+    Ok(RecordBatch::try_new_with_options(
+        schema.clone(),
+        columns,
+        &options,
+    )?)
 }
 
 fn conform(array: &ArrayRef, target: &Field) -> Result<ArrayRef> {

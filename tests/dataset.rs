@@ -571,3 +571,77 @@ async fn compression_changes_the_stored_size() {
     }
     assert!(sizes[1] * 4 < sizes[0], "sizes: {sizes:?}");
 }
+
+#[tokio::test]
+async fn empty_projection_reads_global_attributes() {
+    let dir = tempfile::tempdir().unwrap();
+    let batches = vec![sea_surface(2, 3, 280.0, "a"), sea_surface(2, 3, 290.0, "b")];
+    let dataset = write(&uri(&dir), rows(batches), &WriteOptions::default())
+        .await
+        .unwrap();
+    let rows = scan(&dataset).project(&[]).try_collect().await.unwrap();
+    assert_eq!(rows.len(), 2);
+    for (row, title) in rows.iter().zip(["a", "b"]) {
+        assert_eq!(row.num_columns(), 0);
+        let expected = Attributes::new().with("title", title);
+        assert_eq!(row.attributes(), &expected);
+    }
+}
+
+#[tokio::test]
+async fn empty_projection_without_global_attributes() {
+    let dir = tempfile::tempdir().unwrap();
+    let batches = vec![
+        stations(vec![1.0]),
+        stations(vec![2.0, 3.0]),
+        stations(vec![4.0]),
+    ];
+    let dataset = write(&uri(&dir), rows(batches), &WriteOptions::default())
+        .await
+        .unwrap();
+    let rows = scan(&dataset).project(&[]).try_collect().await.unwrap();
+    assert_eq!(rows.len(), 3);
+    assert!(rows.iter().all(|row| row.num_columns() == 0));
+    let filtered = scan(&dataset)
+        .project(&[])
+        .filter("array_length(pressure.values) > 1")
+        .try_collect()
+        .await
+        .unwrap();
+    assert_eq!(filtered.len(), 1);
+}
+
+#[tokio::test]
+async fn projection_takes_whole_variables() {
+    let dir = tempfile::tempdir().unwrap();
+    let dataset = write(
+        &uri(&dir),
+        rows(vec![sea_surface(2, 3, 280.0, "a")]),
+        &WriteOptions::default(),
+    )
+    .await
+    .unwrap();
+    for name in [
+        "sst.attrs.units",
+        "sst.values",
+        "sst.attrs",
+        "__global_attrs__.title",
+        "__global_attrs__",
+        "nope",
+    ] {
+        let error = scan(&dataset).project(&[name]).try_collect().await.err();
+        match error {
+            Some(Error::InvalidArgument(message)) => {
+                assert!(message.contains(name), "{name}: {message}")
+            }
+            other => panic!("{name}: {other:?}"),
+        }
+    }
+    let error = scan(&dataset)
+        .project(&["sst.attrs.units"])
+        .try_collect()
+        .await
+        .err();
+    let message = error.unwrap().to_string();
+    assert!(message.contains("whole"), "{message}");
+}

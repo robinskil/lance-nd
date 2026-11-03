@@ -97,18 +97,43 @@ def create(
     column_defaults: ColumnOptions | None = None,
     column_options: dict[str, ColumnOptions] | None = None,
     stats: bool = False,
+    target_fragment_bytes: int | None = None,
+    write_parallelism: int | None = None,
 ) -> Writer:
     """A writer for a new table. ``mode`` is "create" or "overwrite".
 
     ``stats`` stores the min and max of each variable per row, so that a
     Rust scan can skip rows. An append follows the table.
+
+    The writer buffers datasets until they have about
+    ``target_fragment_bytes`` (default 128 MiB) in memory, then writes them
+    as one Lance fragment. ``write_parallelism`` (default 4) fragments are
+    written at the same time.
     """
-    return Writer(_lance_nd.Writer.create(uri, mode, column_defaults, column_options, stats))
+    native = _lance_nd.Writer.create(
+        uri,
+        mode,
+        column_defaults,
+        column_options,
+        stats,
+        target_fragment_bytes,
+        write_parallelism,
+    )
+    return Writer(native)
 
 
-def append(uri: str, column_options: dict[str, ColumnOptions] | None = None) -> Writer:
-    """A writer that appends to an existing table."""
-    return Writer(_lance_nd.Writer.append(uri, column_options))
+def append(
+    uri: str,
+    column_options: dict[str, ColumnOptions] | None = None,
+    target_fragment_bytes: int | None = None,
+    write_parallelism: int | None = None,
+) -> Writer:
+    """A writer that appends to an existing table. See :func:`create` for
+    the fragment options."""
+    native = _lance_nd.Writer.append(
+        uri, column_options, target_fragment_bytes, write_parallelism
+    )
+    return Writer(native)
 
 
 def open(uri: str) -> Table:

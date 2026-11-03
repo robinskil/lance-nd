@@ -8,9 +8,8 @@ use std::sync::{Mutex, OnceLock};
 
 use arrow::array::RecordBatch;
 use arrow::pyarrow::PyArrowType;
-use futures::stream;
 use lance::Dataset;
-use lance_nd::encode::{RowDecoder, encode_rows};
+use lance_nd::encode::encode_rows;
 use lance_nd::stats::has_stats;
 use lance_nd::{
     ByteStreamSplit, ColumnOptions, Compression, NdWriter, StructuralEncoding, WriteMode,
@@ -63,7 +62,16 @@ impl Writer {
     /// A writer for a new table. `mode` is "create" or "overwrite".
     /// `stats` stores the min and max of each variable per row.
     #[staticmethod]
-    #[pyo3(signature = (uri, mode = "create", column_defaults = None, column_options = None, stats = false))]
+    #[pyo3(signature = (
+        uri,
+        mode = "create",
+        column_defaults = None,
+        column_options = None,
+        stats = false,
+        target_fragment_bytes = None,
+        write_parallelism = None,
+    ))]
+    #[allow(clippy::too_many_arguments)]
     fn create(
         py: Python<'_>,
         uri: String,
@@ -71,6 +79,8 @@ impl Writer {
         column_defaults: Option<&Bound<'_, PyDict>>,
         column_options: Option<&Bound<'_, PyDict>>,
         stats: bool,
+        target_fragment_bytes: Option<usize>,
+        write_parallelism: Option<usize>,
     ) -> PyResult<Self> {
         let mode = match mode {
             "create" => WriteMode::Create,
@@ -81,13 +91,17 @@ impl Writer {
                 )));
             }
         };
-        let options = WriteOptions {
-            mode,
-            column_defaults: column_defaults.map(parse_options).transpose()?,
-            column_options: parse_column_options(column_options)?,
-            stats,
-            ..Default::default()
-        };
+        let options = fragment_options(
+            WriteOptions {
+                mode,
+                column_defaults: column_defaults.map(parse_options).transpose()?,
+                column_options: parse_column_options(column_options)?,
+                stats,
+                ..Default::default()
+            },
+            target_fragment_bytes,
+            write_parallelism,
+        );
         let writer = block_on(py, NdWriter::create(&uri, &options)).map_err(to_py)?;
         Ok(Self {
             inner: Mutex::new(Some(writer)),
@@ -97,16 +111,22 @@ impl Writer {
 
     /// A writer that appends to an existing table.
     #[staticmethod]
-    #[pyo3(signature = (uri, column_options = None))]
+    #[pyo3(signature = (uri, column_options = None, target_fragment_bytes = None, write_parallelism = None))]
     fn append(
         py: Python<'_>,
         uri: String,
         column_options: Option<&Bound<'_, PyDict>>,
+        target_fragment_bytes: Option<usize>,
+        write_parallelism: Option<usize>,
     ) -> PyResult<Self> {
-        let options = WriteOptions {
-            column_options: parse_column_options(column_options)?,
-            ..Default::default()
-        };
+        let options = fragment_options(
+            WriteOptions {
+                column_options: parse_column_options(column_options)?,
+                ..Default::default()
+            },
+            target_fragment_bytes,
+            write_parallelism,
+        );
         let writer = block_on(py, NdWriter::append(&uri, &options)).map_err(to_py)?;
         Ok(Self {
             inner: Mutex::new(Some(writer)),
@@ -117,10 +137,7 @@ impl Writer {
     /// Write the datasets of an nd-arrow record batch, one per row, without a commit.
     fn write_batch(&self, py: Python<'_>, batch: PyArrowType<RecordBatch>) -> PyResult<()> {
         let mut writer = self.take()?;
-        let result = block_on(py, async {
-            let rows = RowDecoder::try_new(&batch.0)?.into_rows();
-            writer.write(stream::iter(rows)).await
-        });
+        let result = block_on(py, writer.write_batch(batch.0));
         // The writer stays open after a failed write; its finish() then fails.
         *self.inner.lock().unwrap() = Some(writer);
         result.map_err(to_py)
@@ -178,6 +195,12 @@ impl Table {
         has_stats(&self.dataset.schema().into())
     }
 
+    /// The number of Lance fragments of the table.
+    #[getter]
+    fn num_fragments(&self) -> usize {
+        self.dataset.get_fragments().len()
+    }
+
     /// The number of datasets in the table.
     fn count_rows(&self, py: Python<'_>) -> PyResult<usize> {
         block_on(py, self.dataset.count_rows(None))
@@ -201,6 +224,21 @@ fn _scan_batch(py: Python<'_>, uri: String) -> PyResult<PyArrowType<RecordBatch>
     })
     .map_err(to_py)?;
     Ok(PyArrowType(batch))
+}
+
+/// `options` with the fragment size and the write parallelism, when given.
+fn fragment_options(
+    mut options: WriteOptions,
+    target_fragment_bytes: Option<usize>,
+    write_parallelism: Option<usize>,
+) -> WriteOptions {
+    if let Some(bytes) = target_fragment_bytes {
+        options.target_fragment_bytes = bytes;
+    }
+    if let Some(tasks) = write_parallelism {
+        options.write_parallelism = tasks;
+    }
+    options
 }
 
 /// Encoding options for each named column.

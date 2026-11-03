@@ -133,3 +133,21 @@ def test_stats_off_by_default(table_uri):
     with lance_nd.create(table_uri) as writer:
         writer.write(dataset("a"))
     assert not lance_nd.open(table_uri).has_stats
+
+
+def test_small_writes_share_a_fragment(table_uri):
+    with lance_nd.create(table_uri) as writer:
+        for title in "abc":
+            writer.write(dataset(title))
+    assert lance_nd.open(table_uri).num_fragments == 1
+
+
+def test_fragment_options(table_uri):
+    with lance_nd.create(table_uri, target_fragment_bytes=1, write_parallelism=2) as writer:
+        for title in "abc":
+            writer.write(dataset(title))
+    with lance_nd.append(table_uri, target_fragment_bytes=1) as writer:
+        writer.write([dataset("d"), dataset("e")])
+    table = lance_nd.open(table_uri)
+    assert table.num_fragments == 4
+    assert table.count_rows() == 5

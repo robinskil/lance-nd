@@ -17,14 +17,23 @@ class Writer:
         column_defaults: ColumnOptions | None = None,
         column_options: dict[str, ColumnOptions] | None = None,
         stats: bool = False,
+        target_fragment_bytes: int | None = None,
+        write_parallelism: int | None = None,
     ) -> Writer:
         """A writer for a new table. ``mode`` is "create" or "overwrite".
 
         ``stats`` stores the min and max of each variable per row.
+        ``target_fragment_bytes`` and ``write_parallelism`` override the
+        fragment size and the number of parallel fragment writes.
         """
 
     @staticmethod
-    def append(uri: str, column_options: dict[str, ColumnOptions] | None = None) -> Writer:
+    def append(
+        uri: str,
+        column_options: dict[str, ColumnOptions] | None = None,
+        target_fragment_bytes: int | None = None,
+        write_parallelism: int | None = None,
+    ) -> Writer:
         """A writer that appends to an existing table."""
 
     def write_batch(self, batch: pa.RecordBatch) -> None:
@@ -54,6 +63,10 @@ class Table:
     @property
     def has_stats(self) -> bool:
         """``True`` when the table stores the min and max of each variable per row."""
+
+    @property
+    def num_fragments(self) -> int:
+        """The number of Lance fragments of the table."""
 
     def count_rows(self) -> int:
         """The number of datasets in the table."""

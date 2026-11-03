@@ -8,11 +8,19 @@ GOOD = """
 import lance_nd
 import xarray as xr
 
-writer = lance_nd.create("t.lance", mode="overwrite", column_options={"sst": {"compression": "zstd"}})
+writer = lance_nd.create(
+    "t.lance",
+    mode="overwrite",
+    column_options={"sst": {"compression": "zstd"}},
+    stats=True,
+    target_fragment_bytes=64 << 20,
+    write_parallelism=2,
+)
 writer.write(xr.Dataset(), chunks=["time"], on_drop="ignore")
 table = writer.finish()
 version: int = table.version
 names: list[str] = lance_nd.open("t.lance").variables()
+flags: tuple[bool, int] = (table.has_stats, table.num_fragments)
 """
 
 BAD = """

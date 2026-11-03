@@ -18,8 +18,11 @@ Build the package from this directory with [maturin](https://www.maturin.rs/):
 ```bash
 python -m venv .venv
 .venv/Scripts/python -m pip install maturin pytest numpy pyarrow xarray
-.venv/Scripts/python -m maturin develop
+.venv/Scripts/python -m maturin develop --release
 ```
+
+Without `--release`, maturin builds the Rust code without optimizations,
+and writes are several times slower.
 
 On Linux and macOS, use `.venv/bin/python`.
 
@@ -125,6 +128,14 @@ lance_nd.create(
 `create(uri, stats=True)` stores the min and the max of each variable per
 row. A Rust scan with `filter_expr` uses them to skip rows. An append
 follows the table. `Table.has_stats` tells if a table stores stats.
+
+### Fragments
+
+A writer buffers datasets and writes them as Lance fragments of about
+128 MiB in memory, with up to 4 fragment writes at the same time.
+`create()` and `append()` take `target_fragment_bytes` and
+`write_parallelism` to change these limits. `Table.num_fragments` gives
+the number of fragments.
 
 ### Type hints
 

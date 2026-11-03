@@ -2891,7 +2891,9 @@ dependencies = [
  "arrow",
  "futures",
  "lance",
+ "lance-datafusion",
  "lance-nd",
+ "nd-arrow-array",
  "pyo3",
  "tokio",
 ]

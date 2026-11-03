@@ -11,6 +11,7 @@ from lance_nd._encode import encode, encode_chunks
 from lance_nd._typing import ColumnOptions, Mode, OnDrop
 
 Table = _lance_nd.Table
+Scanner = _lance_nd.Scanner
 
 
 class Writer:
@@ -103,7 +104,7 @@ def create(
     """A writer for a new table. ``mode`` is "create" or "overwrite".
 
     ``stats`` stores the min and max of each variable per row, so that a
-    Rust scan can skip rows. An append follows the table.
+    scan can skip rows. An append follows the table.
 
     The writer buffers datasets until they have about
     ``target_fragment_bytes`` (default 128 MiB) in memory, then writes them

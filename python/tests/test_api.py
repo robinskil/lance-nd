@@ -1,6 +1,7 @@
 from datetime import timedelta
 
 import numpy as np
+import pyarrow as pa
 import pytest
 import xarray as xr
 
@@ -190,3 +191,71 @@ def test_compact_and_cleanup(table_uri):
     assert removed["old_versions"] > 0
     assert removed["bytes_removed"] > 0
     assert lance_nd.open(table_uri).count_rows() == 3
+
+
+def sst_dataset(title, values):
+    return xr.Dataset(
+        {"sst": (("time",), np.array(values), {"units": "K"})},
+        coords={"time": np.arange(len(values))},
+        attrs={"title": title},
+    )
+
+
+def titles(batches):
+    return [batch.column("__global_attrs__")[0]["title"].as_py() for batch in batches]
+
+
+@pytest.fixture
+def ocean(table_uri):
+    with lance_nd.create(table_uri, stats=True) as writer:
+        writer.write(sst_dataset("a", [1.0, 2.0]))
+        writer.write(sst_dataset("b", [5.0, 6.0, 7.0]))
+        writer.write(sst_dataset("c", [3.0]))
+    return lance_nd.open(table_uri)
+
+
+def test_scan_streams_nd_record_batches(ocean):
+    scanner = ocean.scan()
+    first = next(scanner)
+    assert isinstance(first, pa.RecordBatch)
+    assert first.num_rows == 1
+    assert set(first.schema.names) == {"sst", "time", "__global_attrs__"}
+    rest = list(scanner)
+    assert titles([first, *rest]) == ["a", "b", "c"]
+    assert rest[0].column("sst")[0]["values"].as_py() == [5.0, 6.0, 7.0]
+
+
+def test_scan_project_filter_and_limit(ocean):
+    batches = list(ocean.scan(project=["sst"]))
+    assert all(batch.schema.names == ["sst", "__global_attrs__"] for batch in batches)
+    assert titles(ocean.scan(filter="__global_attrs__.title = 'b'")) == ["b"]
+    assert titles(ocean.scan(filter="sst.attrs.units = 'K'", limit=2)) == ["a", "b"]
+
+
+def test_scan_empty_projection_reads_global_attributes(ocean):
+    batches = list(ocean.scan(project=[]))
+    assert [batch.schema.names for batch in batches] == [["__global_attrs__"]] * 3
+
+
+def test_scan_prune_uses_stats(ocean):
+    assert titles(ocean.scan(prune="sst.values > 4.5")) == ["b"]
+    assert titles(ocean.scan(prune="sst.values BETWEEN 2.5 AND 3.5")) == ["c"]
+    both = ocean.scan(filter="__global_attrs__.title <> 'b'", prune="sst.values < 2.5")
+    assert titles(both) == ["a"]
+
+
+def test_scan_errors(ocean):
+    with pytest.raises(LanceNdError):
+        next(ocean.scan(project=["sst.attrs.units"]))
+    with pytest.raises(LanceNdError):
+        ocean.scan(filter="nope = 1 AND")
+
+
+def test_scan_keeps_the_case_of_names(table_uri):
+    ds = xr.Dataset({"TEMP": (("n",), np.array([1.0, 9.0]))}, attrs={"title": "a"})
+    with lance_nd.create(table_uri, stats=True) as writer:
+        writer.write(ds)
+        writer.write(ds.assign(TEMP=ds.TEMP * 10).assign_attrs(title="b"))
+    table = lance_nd.open(table_uri)
+    assert titles(table.scan(prune="TEMP.values > 50")) == ["b"]
+    assert titles(table.scan(project=["TEMP"], filter="__global_attrs__.title = 'a'")) == ["a"]

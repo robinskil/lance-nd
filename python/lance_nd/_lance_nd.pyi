@@ -1,6 +1,7 @@
 """Native classes of lance-nd."""
 
 import datetime
+from collections.abc import Iterator
 
 import pyarrow as pa
 
@@ -76,6 +77,27 @@ class Table:
     def variables(self) -> list[str]:
         """The names of the variables in the table."""
 
+    def scan(
+        self,
+        project: list[str] | None = None,
+        filter: str | None = None,
+        prune: str | None = None,
+        limit: int | None = None,
+        batch_size: int | None = None,
+        batch_size_bytes: int | None = None,
+    ) -> Scanner:
+        """Read the datasets of the table as a stream of nd record batches.
+
+        ``project`` takes whole variable names. Each batch keeps the global
+        attributes, so an empty list reads only the global attributes.
+        ``filter`` is an exact Lance SQL filter, for example
+        ``__global_attrs__.title = 'a'``. ``prune`` is a Lance SQL filter on
+        values, for example ``sst.values > 25``: it uses the stats to skip
+        datasets that surely do not match, and a kept dataset comes back
+        whole. ``batch_size`` and ``batch_size_bytes`` limit the Lance
+        batches that the scan reads.
+        """
+
     def delete(self, predicate: str) -> int:
         """Delete the datasets that match ``predicate``, a Lance SQL filter.
 
@@ -104,6 +126,16 @@ class Table:
         The default is 14 days. The current version always stays. Returns
         ``bytes_removed`` and ``old_versions``.
         """
+
+class Scanner(Iterator[pa.RecordBatch]):
+    """A stream of nd record batches, one per dataset of the table.
+
+    Each item is a record batch of one row: one nd column per variable of
+    the dataset, and the ``__global_attrs__`` column.
+    """
+
+    def __iter__(self) -> Scanner: ...
+    def __next__(self) -> pa.RecordBatch: ...
 
 def _scan_batch(uri: str) -> pa.RecordBatch:
     """The whole table as one nd-arrow record batch. For tests only."""

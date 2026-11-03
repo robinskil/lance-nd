@@ -311,14 +311,19 @@ own compaction fails on a lance-nd table.
 ## Python
 
 The `lance_nd` Python package encodes xarray datasets and writes them to a
-lance-nd table. It commits all datasets of one writer in one version:
+lance-nd table. It commits all datasets of one writer in one version. It
+reads the table back as a stream of nd-arrow record batches:
 
 ```python
 import xarray as xr
 import lance_nd
 
-with lance_nd.create("data/arrays.lance") as writer:
+with lance_nd.create("data/arrays.lance", stats=True) as writer:
     writer.write(xr.open_dataset("obs.nc"))
+
+table = lance_nd.open("data/arrays.lance")
+for batch in table.scan(project=["sst"], prune="sst.values > 300"):
+    ...
 ```
 
 See [python/README.md](python/README.md) for installation and the encoding

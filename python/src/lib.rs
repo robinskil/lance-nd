@@ -4,18 +4,25 @@
 //! package `lance_nd` wraps them and adds the xarray encoder.
 
 use std::collections::HashMap;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use arrow::array::RecordBatch;
+use arrow::datatypes::Schema;
 use arrow::pyarrow::PyArrowType;
+use futures::StreamExt;
+use futures::stream::BoxStream;
 use lance::Dataset;
+use lance_datafusion::planner::Planner;
+use lance_nd::datafusion::common::DFSchema;
+use lance_nd::datafusion::prelude::{SessionConfig, SessionContext};
 use lance_nd::encode::encode_rows;
 use lance_nd::stats::has_stats;
 use lance_nd::{
     ByteStreamSplit, ColumnOptions, CompactOptions, Compression, NdWriter, StructuralEncoding,
     WriteMode, WriteOptions, scan, variables,
 };
+use nd_arrow_array::NdRecordBatch;
 use pyo3::create_exception;
 use pyo3::exceptions::{PyException, PyValueError};
 use pyo3::prelude::*;
@@ -214,6 +221,74 @@ impl Table {
         Ok(fields.iter().map(|f| f.name().clone()).collect())
     }
 
+    /// Read the datasets of the table as a stream of nd record batches.
+    ///
+    /// `filter` is an exact Lance SQL filter. `prune` is a Lance SQL filter
+    /// whose `<variable>.values` parts use the stats to skip datasets.
+    #[pyo3(signature = (
+        project = None,
+        filter = None,
+        prune = None,
+        limit = None,
+        batch_size = None,
+        batch_size_bytes = None,
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    fn scan(
+        &self,
+        py: Python<'_>,
+        project: Option<Vec<String>>,
+        filter: Option<String>,
+        prune: Option<String>,
+        limit: Option<usize>,
+        batch_size: Option<usize>,
+        batch_size_bytes: Option<u64>,
+    ) -> PyResult<Scanner> {
+        // Python has no DataFusion expressions, so the filters are SQL text.
+        let schema = Arc::new(Schema::from(self.dataset.schema()));
+        let planner = Planner::new(schema.clone());
+        let parse = |sql: &str| {
+            planner
+                .parse_filter(sql)
+                .map_err(|error| to_py(lance_nd::Error::from(error)))
+        };
+        // Lance coerces literals to the column type, and fails for a literal
+        // on `<variable>.values`. DataFusion parses without the coercion, and
+        // keeps the case of names as Lance does.
+        let config = SessionConfig::new()
+            .set_bool("datafusion.sql_parser.enable_ident_normalization", false);
+        let context = SessionContext::new_with_config(config);
+        let parse_values = |sql: &str| {
+            let expr = DFSchema::try_from(schema.as_ref().clone())
+                .and_then(|schema| context.parse_sql_expr(sql, &schema));
+            expr.map_err(|error| to_py(lance_nd::Error::from(lance::Error::from(error))))
+        };
+        let mut scanner = scan(&self.dataset);
+        if let Some(project) = &project {
+            let names: Vec<&str> = project.iter().map(String::as_str).collect();
+            scanner = scanner.project(&names);
+        }
+        if let Some(filter) = &filter {
+            scanner = scanner.lance_filter(parse(filter)?);
+        }
+        if let Some(prune) = &prune {
+            scanner = scanner.filter_expr(parse_values(prune)?);
+        }
+        if let Some(limit) = limit {
+            scanner = scanner.limit(limit);
+        }
+        if let Some(rows) = batch_size {
+            scanner = scanner.batch_size(rows);
+        }
+        if let Some(bytes) = batch_size_bytes {
+            scanner = scanner.batch_size_bytes(bytes);
+        }
+        let rows = block_on(py, scanner.try_into_stream()).map_err(to_py)?;
+        Ok(Scanner {
+            rows: Mutex::new(Some(rows)),
+        })
+    }
+
     /// Delete the datasets that match `predicate`, a Lance SQL filter.
     /// Returns the number of deleted datasets.
     fn delete(&mut self, py: Python<'_>, predicate: String) -> PyResult<u64> {
@@ -263,6 +338,37 @@ impl Table {
 }
 
 /// The whole table as one nd-arrow record batch. For tests only.
+/// A stream of nd record batches, one per dataset of the table.
+#[pyclass(module = "lance_nd._lance_nd")]
+struct Scanner {
+    rows: Mutex<Option<BoxStream<'static, lance_nd::Result<NdRecordBatch>>>>,
+}
+
+#[pymethods]
+impl Scanner {
+    fn __iter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
+        slf
+    }
+
+    /// The next dataset as a record batch of one row.
+    fn __next__(&self, py: Python<'_>) -> PyResult<Option<PyArrowType<RecordBatch>>> {
+        let mut rows = self.rows.lock().map_err(|_| closed())?;
+        let Some(stream) = rows.as_mut() else {
+            return Ok(None);
+        };
+        match block_on(py, stream.next()) {
+            Some(row) => {
+                let row = row.map_err(to_py)?;
+                Ok(Some(PyArrowType(encode_rows(&[row]).map_err(to_py)?)))
+            }
+            None => {
+                *rows = None;
+                Ok(None)
+            }
+        }
+    }
+}
+
 #[pyfunction]
 fn _scan_batch(py: Python<'_>, uri: String) -> PyResult<PyArrowType<RecordBatch>> {
     let batch = block_on(py, async {
@@ -371,6 +477,7 @@ fn _lance_nd(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("LanceNdError", m.py().get_type::<LanceNdError>())?;
     m.add_class::<Writer>()?;
     m.add_class::<Table>()?;
+    m.add_class::<Scanner>()?;
     m.add_function(wrap_pyfunction!(_scan_batch, m)?)?;
     Ok(())
 }

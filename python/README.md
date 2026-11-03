@@ -3,13 +3,14 @@
 Store xarray datasets as N-dimensional Arrow arrays in a
 [lance-nd](../README.md) table.
 
-The package does three things:
+The package does four things:
 
 1. It encodes an `xarray.Dataset` as a PyArrow record batch in the
    [nd-arrow format](https://github.com/robinskil/nd-arrow-array/blob/main/FORMAT.md).
 2. It passes the record batch to Rust.
 3. Rust writes the datasets to a lance-nd table, and commits all of them in
    one version when you call `finish()`.
+4. It reads the table back as a stream of nd-arrow record batches.
 
 ## Install
 
@@ -57,6 +58,8 @@ table.version, table.count_rows(), table.variables()
 | `Writer.write(data, chunks=None)` | Write datasets as data files, without a commit. With `chunks`, one chunk at a time. |
 | `Writer.finish()` | Commit all written datasets in one version. |
 | `Writer.abort()` | Drop all written datasets. |
+| `Table.scan(project=None, filter=None, prune=None, limit=None)` | Read the datasets as a stream of nd-arrow record batches. |
+| `Table.delete(predicate)`, `Table.compact()` and `Table.cleanup_old_versions()` | Delete datasets and free disk space. |
 
 Rules:
 
@@ -126,8 +129,37 @@ lance_nd.create(
 ### Stats
 
 `create(uri, stats=True)` stores the min and the max of each variable per
-row. A Rust scan with `filter_expr` uses them to skip rows. An append
-follows the table. `Table.has_stats` tells if a table stores stats.
+row. A scan with `prune` uses them to skip rows. An append follows the
+table. `Table.has_stats` tells if a table stores stats.
+
+### Read
+
+`Table.scan()` reads the datasets as a stream. Each item is a
+`pyarrow.RecordBatch` of one row in the nd-arrow format: one nd column per
+variable of the dataset, and the `__global_attrs__` column. The scan reads
+only a few Lance batches ahead, so memory stays small for a large table.
+
+```python
+table = lance_nd.open("data/obs.lance")
+for batch in table.scan(
+    project=["sst"],
+    filter="__global_attrs__.title = 'run 1'",
+    prune="sst.values > 300",
+):
+    values = batch.column("sst")[0]["values"]
+```
+
+- `project` takes whole variable names. Each batch keeps the global
+  attributes, so `project=[]` reads only the global attributes. A nested
+  field, such as `sst.attrs.units`, raises an error.
+- `filter` is an exact Lance SQL filter, for example on
+  `__global_attrs__.title` or `sst.attrs.units`.
+- `prune` is a filter on values, for example `sst.values > 300`. It uses the
+  stats to skip datasets that surely do not match. A kept dataset comes back
+  whole, so it can hold values outside the filter. Without stats, it keeps
+  all datasets. `filter` and `prune` can be used together.
+- `limit`, `batch_size` and `batch_size_bytes` limit the rows and the Lance
+  batches that the scan reads.
 
 ### Fragments
 

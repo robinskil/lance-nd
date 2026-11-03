@@ -26,6 +26,9 @@ flags: tuple[bool, int] = (table.has_stats, table.num_fragments)
 deleted: int = table.delete("__global_attrs__.title = 'a'")
 compacted: dict[str, int] = table.compact(target_fragment_bytes=64 << 20, deleted_fraction=0.2)
 removed: dict[str, int] = table.cleanup_old_versions(datetime.timedelta(days=1))
+scanner: lance_nd.Scanner = table.scan(project=["sst"], filter="sst.attrs.units = 'K'", prune="sst.values > 1", limit=10)
+for batch in scanner:
+    rows: int = batch.num_rows
 """
 
 BAD = """

@@ -17,4 +17,6 @@ futures = "0.3"
 lance-nd = { path = ".." }
 tokio = { version = "1", features = ["rt-multi-thread"] }
 lance = { version = "11", default-features = false }
+lance-datafusion = "11"
+nd-arrow-array = { git = "https://github.com/robinskil/nd-arrow-array" }
 pyo3 = { version = "0.28", features = ["abi3-py310"] }

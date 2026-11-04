@@ -4,6 +4,7 @@ import pytest
 import xarray as xr
 
 from conftest import GLOBAL_ATTRIBUTES, ND_ARRAY
+import lance_nd
 from lance_nd import encode
 from lance_nd._lance_nd import Writer, _scan_batch
 
@@ -292,3 +293,62 @@ def test_object_text_values():
 def test_object_values_must_be_text(values):
     with pytest.raises(TypeError, match="'m'"):
         encode(xr.Dataset({"m": (("n",), values)}))
+
+
+def julian_dataset(units="days since 1973-02-20", calendar="julian", days=(5.0, np.nan, 6.5)):
+    """A dataset with a time axis that xarray decodes into cftime objects."""
+    raw = xr.Dataset(
+        {"temp": (("time",), np.array([1.0, 2.0, 3.0][: len(days)]))},
+        coords={"time": ("time", np.array(days), {"units": units, "calendar": calendar})},
+    )
+    return xr.decode_cf(raw, decode_times=xr.coders.CFDatetimeCoder(use_cftime=True))
+
+
+def test_cftime_needs_convert_calendar():
+    ds = julian_dataset()
+    with pytest.raises(TypeError, match="convert_calendar"):
+        encode(ds)
+
+
+def test_cftime_converts_to_the_same_instant():
+    import cftime
+
+    times = np.array(
+        [cftime.DatetimeJulian(1973, 2, 25), None, cftime.DatetimeJulian(1973, 2, 26, 12)],
+        dtype=object,
+    )
+    ds = xr.Dataset({"temp": (("time",), np.zeros(3))}, coords={"time": ("time", times)})
+    batch = encode(ds, convert_calendar=True)
+    time = batch.column("time")[0].as_py()
+    assert batch.column("time").type.field("values").type == pa.list_(pa.timestamp("ns"))
+    # Julian 1973-02-25 is the Gregorian 1973-03-10.
+    assert str(time["values"][0]) == "1973-03-10 00:00:00"
+    assert time["values"][1] is None
+    assert str(time["values"][2]) == "1973-03-11 12:00:00"
+
+
+def test_gregorian_cftime_keeps_its_labels():
+    ds = julian_dataset(units="hours since 2000-01-01", calendar="proleptic_gregorian", days=(1.0, 25.0))
+    batch = encode(ds, convert_calendar=True)
+    values = [str(v) for v in batch.column("time")[0].as_py()["values"]]
+    assert values == ["2000-01-01 01:00:00", "2000-01-02 01:00:00"]
+
+
+def test_cftime_without_real_instants_raises():
+    ds = julian_dataset(calendar="360_day")
+    with pytest.raises(ValueError, match="360_day"):
+        encode(ds, convert_calendar=True)
+
+
+def test_cftime_outside_the_nanosecond_range_raises():
+    ds = julian_dataset(units="days since 1500-01-01", days=(1.0, 2.0))
+    with pytest.raises(ValueError, match="range"):
+        encode(ds, convert_calendar=True)
+
+
+def test_writer_converts_calendars(table_uri):
+    ds = julian_dataset().chunk({"time": 2})
+    with lance_nd.create(table_uri) as writer:
+        writer.write(julian_dataset(), convert_calendar=True)
+        writer.write(ds, chunks=["time"], convert_calendar=True)
+    assert lance_nd.open(table_uri).count_rows() == 3

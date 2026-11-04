@@ -277,10 +277,21 @@ Value types:
 | `datetime64[unit]` | `Timestamp(unit)` |
 | `timedelta64[unit]` | `Duration(unit)` |
 | `str`, `bytes`, `object` with strings | `Utf8` |
+| `object` with cftime values, with `convert_calendar=True` | `Timestamp(ns)` |
 | other dtypes | `TypeError` |
 
 Missing values: NaN, NaT and `None` become nulls. Big-endian data and
 arrays in Fortran order are converted. Dask arrays are loaded into memory.
+
+Calendars: xarray decodes a calendar that `datetime64` cannot hold, such as
+a Julian one, into cftime objects. `encode()`, `encode_chunks()` and
+`Writer.write()` take `convert_calendar=True` to store them as
+`datetime64[ns]` values of the same instant. The calendar label changes: a
+Julian 1973-02-25 becomes the Gregorian 1973-03-10. A calendar without real
+instants, such as `360_day` or `noleap`, and a date outside 1677 to 2262
+raise a `ValueError`. Without the option, cftime values raise a
+`TypeError`. To keep the raw numbers with their `units` and `calendar`
+attributes instead, open the files with `decode_times=False`.
 
 Attribute types: `str`, `bool`, `int` (`Int64`), `float` (`Float64`),
 NumPy scalars, and 1-D arrays, lists or tuples of one scalar type. Other

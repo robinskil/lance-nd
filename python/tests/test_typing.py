@@ -20,7 +20,7 @@ writer = lance_nd.create(
     write_parallelism=2,
     casting="safe",
 )
-writer.write(xr.Dataset(), chunks=["time"], on_drop="ignore")
+writer.write(xr.Dataset(), chunks=["time"], on_drop="ignore", convert_calendar=True)
 table = writer.finish()
 version: int = table.version
 names: list[str] = lance_nd.open("t.lance").variables()

@@ -6,6 +6,7 @@ from collections.abc import Hashable, Iterator, Sequence
 from typing import Any
 
 import numpy as np
+import pandas as pd
 import pyarrow as pa
 import xarray as xr
 
@@ -35,6 +36,7 @@ def encode(
     datasets: xr.Dataset | Sequence[xr.Dataset],
     chunks: Sequence[str] | None = None,
     on_drop: OnDrop = "warn",
+    convert_calendar: bool = False,
 ) -> pa.RecordBatch:
     """Encode one dataset or a list of datasets, one row per dataset.
 
@@ -44,11 +46,17 @@ def encode(
 
     With ``chunks``, each dask chunk over those dimensions is one row, see
     :func:`encode_chunks`. This loads all chunks.
+
+    xarray decodes a calendar that ``datetime64`` cannot hold, such as a
+    Julian one, into cftime objects. ``convert_calendar`` turns them into
+    ``datetime64[ns]`` values of the same instant: a Julian 1973-02-25
+    becomes the Gregorian 1973-03-10. Without it, cftime values raise
+    ``TypeError``.
     """
     datasets = _datasets(datasets)
     if chunks is not None:
         datasets = [part for ds in datasets for part in _chunk_datasets(ds, chunks, on_drop)]
-    rows = [_dataset_row(ds) for ds in datasets]
+    rows = [_dataset_row(ds, convert_calendar) for ds in datasets]
     names = list(dict.fromkeys(name for variables, _ in rows for name in variables))
     fields = []
     columns = []
@@ -67,17 +75,20 @@ def encode(
 
 
 def encode_chunks(
-    ds: xr.Dataset, chunks: Sequence[str], on_drop: OnDrop = "warn"
+    ds: xr.Dataset,
+    chunks: Sequence[str],
+    on_drop: OnDrop = "warn",
+    convert_calendar: bool = False,
 ) -> Iterator[pa.RecordBatch]:
     """Encode each dask chunk of ``ds`` over the ``chunks`` dimensions as one row.
 
     Yields one record batch per chunk and computes one chunk at a time.
     A variable is kept when all its dimensions are chunk dimensions, or when
     it has all chunk dimensions. ``on_drop`` is "warn", "raise" or "ignore"
-    for the other variables.
+    for the other variables. See :func:`encode` for ``convert_calendar``.
     """
     for part in _chunk_datasets(ds, chunks, on_drop):
-        yield encode(part)
+        yield encode(part, convert_calendar=convert_calendar)
 
 
 def _datasets(datasets: xr.Dataset | Sequence[xr.Dataset]) -> list[xr.Dataset]:
@@ -121,7 +132,9 @@ def _chunk_datasets(ds: xr.Dataset, chunks: Sequence[str], on_drop: OnDrop) -> I
         yield kept.isel(dict(zip(chunks, parts, strict=True)))
 
 
-def _dataset_row(ds: xr.Dataset) -> tuple[dict[str, _Variable], dict[Hashable, Any]]:
+def _dataset_row(
+    ds: xr.Dataset, convert_calendar: bool = False
+) -> tuple[dict[str, _Variable], dict[Hashable, Any]]:
     """The encoded variables of one dataset, and its global attributes."""
     if "coordinates" in ds.attrs:
         raise ValueError("the dataset already has a 'coordinates' attribute")
@@ -137,7 +150,8 @@ def _dataset_row(ds: xr.Dataset) -> tuple[dict[str, _Variable], dict[Hashable, A
         attrs = _non_empty(var.attrs)
         if coordinates.get(name):
             attrs["coordinates"] = " ".join(coordinates[name])
-        variables[name] = (_values(name, var), [str(d) for d in var.dims], var.shape, attrs)
+        values = _values(name, var, convert_calendar)
+        variables[name] = (values, [str(d) for d in var.dims], var.shape, attrs)
     attrs = _non_empty(ds.attrs)
     unlisted = [name for name in _other_coordinates(ds) if name not in listed]
     if unlisted:
@@ -160,9 +174,18 @@ def _cf_coordinates(ds: xr.Dataset) -> dict[str, list[str]]:
     return result
 
 
-def _values(name: str, var: xr.Variable) -> pa.Array:
+def _values(name: str, var: xr.Variable, convert_calendar: bool = False) -> pa.Array:
     """The flat values of a variable in C order, with nulls for missing values."""
     data = np.asarray(var.values)
+    if data.dtype.kind == "O" and _holds_cftime(data):
+        if not convert_calendar:
+            raise TypeError(
+                f"variable '{name}' holds cftime values, because xarray cannot decode "
+                "its calendar into datetime64. Pass convert_calendar=True for the "
+                "same instants as datetime64[ns], or open the files with "
+                "decode_times=False to keep the raw numbers"
+            )
+        data = _cftime_to_datetime64(name, data)
     if data.dtype.kind in "biufMm" and not data.dtype.isnative:
         data = data.astype(data.dtype.newbyteorder("="))
     flat = np.ascontiguousarray(data).reshape(-1)
@@ -182,6 +205,61 @@ def _values(name: str, var: xr.Variable) -> pa.Array:
         if array is not None and (pa.types.is_string(array.type) or pa.types.is_null(array.type)):
             return array.cast(pa.string())
     raise TypeError(f"variable '{name}' has the unsupported dtype {data.dtype}")
+
+
+# The range of datetime64[ns]. A value outside it wraps without an error.
+_NS_MIN = np.datetime64("1677-09-21T00:12:44", "us")
+_NS_MAX = np.datetime64("2262-04-11T23:47:16", "us")
+
+
+def _holds_cftime(data: np.ndarray) -> bool:
+    """``True`` when the first present value of an object array is a cftime."""
+    flat = data.reshape(-1)
+    missing = pd.isna(flat)
+    if missing.all():
+        return False
+    sample = flat[int(np.argmin(missing))]
+    return type(sample).__module__.split(".")[0] == "cftime"
+
+
+def _cftime_to_datetime64(name: str, data: np.ndarray) -> np.ndarray:
+    """The same instants as the cftime values of ``data``, as ``datetime64[ns]``.
+
+    cftime maps between two real-world calendars through the Julian day, so
+    each instant stays exact. One ``date2num`` call converts all values; a
+    call per value costs about three times more.
+    """
+    import cftime
+
+    flat = data.reshape(-1)
+    missing = np.asarray(pd.isna(flat), dtype=bool)
+    present = flat[~missing]
+    calendar = present[0].calendar
+    try:
+        # The Unix epoch, written on the source calendar: the time since it
+        # is the time since the Gregorian epoch.
+        epoch = cftime.datetime(1970, 1, 1, calendar="proleptic_gregorian").change_calendar(
+            calendar
+        )
+    except ValueError as error:
+        raise ValueError(
+            f"variable '{name}' uses the '{calendar}' calendar, which has no real "
+            "instants, so no exact Gregorian date exists. Open the files with "
+            "decode_times=False to keep the raw numbers"
+        ) from error
+    units = "microseconds since " + epoch.strftime("%Y-%m-%d %H:%M:%S")
+    micros = np.rint(np.asarray(cftime.date2num(present, units, calendar=calendar), "float64"))
+    stamps = np.datetime64(0, "us") + micros.astype("int64").astype("timedelta64[us]")
+    outside = (stamps < _NS_MIN) | (stamps > _NS_MAX)
+    if outside.any():
+        raise ValueError(
+            f"variable '{name}' has {int(outside.sum())} date(s) outside the range of "
+            f"datetime64[ns], such as {stamps[outside][0]}. The range is {_NS_MIN} to "
+            f"{_NS_MAX}. Open the files with decode_times=False to keep the raw numbers"
+        )
+    out = np.full(flat.size, np.datetime64("NaT", "us"), dtype="datetime64[us]")
+    out[~missing] = stamps
+    return out.reshape(data.shape).astype("datetime64[ns]")
 
 
 def _column(name: str, rows: list[_Variable | None]) -> pa.StructArray:

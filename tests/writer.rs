@@ -576,3 +576,71 @@ async fn absent_variable_in_a_fragment_of_many_rows() {
     assert_eq!(dataset.get_fragments().len(), 1);
     assert_eq!(read_all(&dataset).await.len(), 2000);
 }
+
+/// Row `i`: `v<i % 40>` as Float64, `w<i % 7>` as Int32 with the attribute
+/// `k<i % 5> = i`, and the global attribute `id = i`.
+fn varied_row(i: usize) -> NdRecordBatch {
+    let v = format!("v{}", i % 40);
+    let w = format!("w{}", i % 7);
+    let schema = Arc::new(Schema::new(vec![
+        Field::new(&v, DataType::Float64, true),
+        Field::new(&w, DataType::Int32, true),
+    ]));
+    let v_array = NdArrowArray::try_new(
+        Arc::new(Float64Array::from(vec![i as f64, i as f64 + 0.5])),
+        Dimensions::try_new([("n", 2)]).unwrap(),
+    )
+    .unwrap();
+    let w_array = NdArrowArray::try_new(
+        Arc::new(Int32Array::from(vec![i as i32])),
+        Dimensions::try_new([("m", 1)]).unwrap(),
+    )
+    .unwrap()
+    .with_attributes(Attributes::new().with(format!("k{}", i % 5).as_str(), i as i64));
+    NdRecordBatch::try_new_inferred(schema, vec![v_array, w_array])
+        .unwrap()
+        .with_attributes(Attributes::new().with("id", i as i64))
+}
+
+#[tokio::test]
+async fn many_varying_variables_round_trip() {
+    let dir = tempfile::tempdir().unwrap();
+    let options = WriteOptions {
+        stats: true,
+        target_fragment_bytes: 64 << 10,
+        ..Default::default()
+    };
+    let rows_in: Vec<NdRecordBatch> = (0..300).map(varied_row).collect();
+    let dataset = write_one_by_one(&uri(&dir), rows_in.clone(), &options).await;
+    assert!(dataset.get_fragments().len() > 2);
+    let rows_out = read_all(&dataset).await;
+    assert_eq!(rows_out.len(), rows_in.len());
+    for (i, (out, expected)) in rows_out.iter().zip(&rows_in).enumerate() {
+        assert_eq!(out.attributes(), expected.attributes(), "row {i}");
+        assert_eq!(out.num_columns(), 2, "row {i}");
+        for field in expected.schema().fields() {
+            assert_eq!(
+                out.column_by_name(field.name()),
+                expected.column_by_name(field.name()),
+                "row {i} {}",
+                field.name()
+            );
+        }
+    }
+    // The stats of a variable that only some fragments hold.
+    let filter = lance_nd::datafusion::functions::core::expr_fn::get_field(
+        lance_nd::datafusion::logical_expr::col("v3"),
+        "values",
+    )
+    .gt(lance_nd::datafusion::logical_expr::lit(200.0));
+    let pruned = scan(&dataset)
+        .filter_expr(filter)
+        .try_collect()
+        .await
+        .unwrap();
+    let ids: Vec<String> = pruned
+        .iter()
+        .map(|row| format!("{:?}", row.attributes()))
+        .collect();
+    assert_eq!(pruned.len(), 3, "{ids:?}");
+}

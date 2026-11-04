@@ -2,12 +2,13 @@
 
 use std::sync::Arc;
 
+use arrow::array::BooleanBufferBuilder;
 use arrow::array::{
-    Array, ArrayRef, AsArray, ListArray, RecordBatch, RecordBatchOptions, StructArray,
+    Array, ArrayRef, AsArray, ListArray, RecordBatch, RecordBatchOptions, StructArray, make_array,
     new_empty_array, new_null_array,
 };
 use arrow::buffer::{NullBuffer, OffsetBuffer};
-use arrow::compute::{is_null, kernels::zip::zip};
+use arrow::compute::{concat, is_null, kernels::zip::zip};
 use arrow::datatypes::{DataType, Field, FieldRef, Fields, Schema, SchemaRef};
 
 use crate::error::{Error, Result};
@@ -101,6 +102,142 @@ pub fn conform_batch(batch: &RecordBatch, schema: &SchemaRef) -> Result<RecordBa
         columns,
         &options,
     )?)
+}
+
+/// The rows of `batches` as one batch of `schema`. A column or a struct
+/// child that a batch lacks gets absent rows, as [`conform_batch`] gives
+/// them.
+pub fn concat_conformed(schema: &SchemaRef, batches: &[RecordBatch]) -> Result<RecordBatch> {
+    let rows: usize = batches.iter().map(|batch| batch.num_rows()).sum();
+    let columns = schema
+        .fields()
+        .iter()
+        .map(|field| {
+            let parts: Vec<Part> = batches
+                .iter()
+                .map(|batch| {
+                    (
+                        batch.column_by_name(field.name()).cloned(),
+                        batch.num_rows(),
+                    )
+                })
+                .collect();
+            concat_parts(field, &parts)
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let options = RecordBatchOptions::new().with_row_count(Some(rows));
+    Ok(RecordBatch::try_new_with_options(
+        schema.clone(),
+        columns,
+        &options,
+    )?)
+}
+
+/// The array of one batch, or `None` when the batch lacks it, and the rows.
+type Part = (Option<ArrayRef>, usize);
+
+/// One array of `field` from `parts`. A struct is built child by child, so
+/// a batch with few of many children costs little.
+fn concat_parts(field: &Field, parts: &[Part]) -> Result<ArrayRef> {
+    if let DataType::Struct(children) = field.data_type()
+        && !children.is_empty()
+    {
+        let columns = children
+            .iter()
+            .map(|child| {
+                let child_parts: Vec<Part> = parts
+                    .iter()
+                    .map(|(array, rows)| {
+                        let column = array
+                            .as_ref()
+                            .and_then(|array| array.as_struct().column_by_name(child.name()));
+                        (column.cloned(), *rows)
+                    })
+                    .collect();
+                concat_parts(child, &child_parts)
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let mut validity = BooleanBufferBuilder::new(parts.iter().map(|(_, rows)| rows).sum());
+        for (array, rows) in parts {
+            match array {
+                Some(array) => match array.logical_nulls() {
+                    Some(nulls) => validity.append_buffer(nulls.inner()),
+                    None => validity.append_n(*rows, true),
+                },
+                // As `absent`: a nullable struct is null, else valid.
+                None => validity.append_n(*rows, !field.is_nullable()),
+            }
+        }
+        let nulls = NullBuffer::new(validity.finish());
+        let nulls = (nulls.null_count() > 0).then_some(nulls);
+        return Ok(Arc::new(StructArray::try_new(
+            children.clone(),
+            columns,
+            nulls,
+        )?));
+    }
+    let mut arrays: Vec<ArrayRef> = Vec::with_capacity(parts.len());
+    let mut missing = 0;
+    for (array, rows) in parts {
+        match array {
+            Some(array) => {
+                // One absent array for each run of batches without the field.
+                if missing > 0 {
+                    arrays.push(absent(field, missing)?);
+                    missing = 0;
+                }
+                arrays.push(conform(array, field)?);
+            }
+            None => missing += rows,
+        }
+    }
+    if missing > 0 || arrays.is_empty() {
+        arrays.push(absent(field, missing)?);
+    }
+    let arrays: Vec<&dyn Array> = arrays.iter().map(|array| array.as_ref()).collect();
+    Ok(match arrays.as_slice() {
+        [one] => make_array(one.to_data()),
+        _ => concat(&arrays)?,
+    })
+}
+
+/// The top-level fields of `staged` that `schemas` use, in the order of
+/// `staged`. A struct keeps all its children: Lance 11 cannot read a
+/// fragment whose struct has fewer children than the table.
+pub fn used_fields(staged: &Schema, schemas: &[SchemaRef]) -> Schema {
+    let fields: Vec<FieldRef> = staged
+        .fields()
+        .iter()
+        .filter(|field| {
+            schemas
+                .iter()
+                .any(|schema| schema.column_with_name(field.name()).is_some())
+        })
+        .cloned()
+        .collect();
+    Schema::new_with_metadata(fields, staged.metadata().clone())
+}
+
+/// `true` when `staged` has each field of `new` with the same type. A
+/// struct of `new` can have fewer children.
+pub fn holds_schema(staged: &Schema, new: &Schema) -> bool {
+    new.fields().iter().all(|field| {
+        staged
+            .field_with_name(field.name())
+            .is_ok_and(|staged| holds(staged.data_type(), field.data_type()))
+    })
+}
+
+fn holds(staged: &DataType, new: &DataType) -> bool {
+    match (staged, new) {
+        (DataType::Struct(staged), DataType::Struct(new)) => new.iter().all(|field| {
+            staged
+                .find(field.name())
+                .is_some_and(|(_, staged)| holds(staged.data_type(), field.data_type()))
+        }),
+        (DataType::List(staged), DataType::List(new)) => holds(staged.data_type(), new.data_type()),
+        (staged, new) => staged == new,
+    }
 }
 
 fn conform(array: &ArrayRef, target: &Field) -> Result<ArrayRef> {

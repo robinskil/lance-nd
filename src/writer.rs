@@ -1,12 +1,11 @@
 //! Write nd record batches in several calls and commit them once.
 
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::pin::pin;
 use std::sync::Arc;
 
 use arrow::array::{RecordBatch, RecordBatchIterator};
-use arrow::compute::concat_batches;
-use arrow::datatypes::Schema;
+use arrow::datatypes::{Schema, SchemaRef};
 use futures::Stream;
 use lance::Dataset;
 use lance::dataset::fragment::write::FragmentCreateBuilder;
@@ -21,7 +20,7 @@ use crate::cast::Casting;
 use crate::encode::{RowDecoder, encode_rows};
 use crate::error::{Error, Result};
 use crate::options::ColumnOptions;
-use crate::schema::{conform_batch, merge_schemas};
+use crate::schema::{concat_conformed, holds_schema, merge_schemas, used_fields};
 use crate::stats::STATS_FIELD;
 use crate::widen::{promotions, widen};
 use crate::write::{
@@ -227,19 +226,27 @@ impl NdWriter {
     /// A schema conflict changes nothing, so it only rejects `batch`. A
     /// failed fragment write makes the writer fail.
     async fn push(&mut self, batch: RecordBatch) -> Result<()> {
-        let (arrow, lance) = match &self.schema {
-            Some((arrow, lance)) => (
-                merge_schemas(arrow, &batch.schema())?,
-                lance.merge(batch.schema().as_ref())?,
-            ),
-            None => (
-                batch.schema().as_ref().clone(),
-                LanceSchema::try_from(batch.schema().as_ref())?,
-            ),
+        // Most rows bring no new field. A merge copies the full staged
+        // schema, which is slow with thousands of variables.
+        let grows = match &self.schema {
+            Some((arrow, _)) => !holds_schema(arrow, &batch.schema()),
+            None => true,
         };
-        let mut lance = lance;
-        lance.set_field_id(self.base_max_field_id());
-        self.schema = Some((arrow, lance));
+        if grows {
+            let (arrow, lance) = match &self.schema {
+                Some((arrow, lance)) => (
+                    merge_schemas(arrow, &batch.schema())?,
+                    lance.merge(batch.schema().as_ref())?,
+                ),
+                None => (
+                    batch.schema().as_ref().clone(),
+                    LanceSchema::try_from(batch.schema().as_ref())?,
+                ),
+            };
+            let mut lance = lance;
+            lance.set_field_id(self.base_max_field_id());
+            self.schema = Some((arrow, lance));
+        }
         self.buffered_bytes += batch.get_array_memory_size();
         self.buffer.push(batch);
         if self.buffered_bytes >= self.options.target_fragment_bytes {
@@ -258,25 +265,18 @@ impl NdWriter {
         let batches = std::mem::take(&mut self.buffer);
         self.buffered_bytes = 0;
         let (arrow, lance) = self.schema.as_ref().expect("a buffered row has a schema");
-        // Only the columns of the buffered rows: the other fields read as null.
-        let present: Vec<_> = arrow
-            .fields()
+        // Only the columns of the buffered rows: the other columns read as
+        // null. Rows of one buffer often share a schema.
+        let schemas: Vec<SchemaRef> = batches
             .iter()
-            .filter(|field| {
-                batches
-                    .iter()
-                    .any(|b| b.schema().column_with_name(field.name()).is_some())
-            })
-            .cloned()
+            .map(|batch| batch.schema())
+            .collect::<HashSet<_>>()
+            .into_iter()
             .collect();
-        let present = Arc::new(Schema::new_with_metadata(present, arrow.metadata().clone()));
-        let batches = batches
-            .iter()
-            .map(|batch| conform_batch(batch, &present))
-            .collect::<Result<Vec<_>>>()?;
+        let present = Arc::new(used_fields(arrow, &schemas));
         // One batch per fragment: Lance 11 fails to read back a fragment of
         // several batches when a struct column has nulls and large lists.
-        let batch = concat_batches(&present, &batches)?;
+        let batch = concat_conformed(&present, &batches)?;
         let projected =
             lance.project_by_schema(present.as_ref(), OnMissing::Error, OnTypeMismatch::Error)?;
         let uri = self.uri.clone();

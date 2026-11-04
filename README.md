@@ -317,8 +317,12 @@ before it writes the first fragment with them, so readers can see new empty
 columns before `finish`. `finish` then commits a plain append.
 
 `NdWriter` buffers rows and writes them as Lance fragments of about 128 MiB
-in memory, with up to 4 fragment writes at the same time. A larger row gets
-a fragment of its own. `WriteOptions::target_fragment_bytes` and
+on disk, with up to 4 fragment writes at the same time. Lance compresses the
+data, so the writer learns the ratio of disk to memory bytes from the
+fragments it wrote. The first fragments use the size in memory, and the
+buffer holds at most 8 times the target in memory. A row is never split.
+Each commit writes the rest of the buffer as a smaller fragment, so use
+`compact` for exact sizes. `WriteOptions::target_fragment_bytes` and
 `WriteOptions::write_parallelism` change these limits. The writer must run
 on a Tokio runtime.
 

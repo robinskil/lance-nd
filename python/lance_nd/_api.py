@@ -120,8 +120,8 @@ def create(
     datasets that it wrote before such a widening.
 
     The writer buffers datasets until they have about
-    ``target_fragment_bytes`` (default 128 MiB) in memory, then writes them
-    as one Lance fragment. ``write_parallelism`` (default 4) fragments are
+    ``target_fragment_bytes`` (default 128 MiB) on disk, as estimated from
+    the fragments written so far, then writes them as one Lance fragment. ``write_parallelism`` (default 4) fragments are
     written at the same time.
     """
     native = _lance_nd.Writer.create(

@@ -48,8 +48,11 @@ pub struct WriteOptions {
     /// table, see [`Casting`].
     pub casting: Casting,
     /// [`crate::NdWriter`] buffers rows until they have about this many
-    /// bytes in memory, then writes them as one Lance fragment. A larger
-    /// row gets a fragment of its own. [`write()`] ignores it.
+    /// bytes on disk, then writes them as one Lance fragment. The writer
+    /// learns the ratio of disk to memory bytes from the fragments it wrote.
+    /// Before the first fragment, it counts bytes in memory. The buffer
+    /// holds at most 8 times this size in memory. A row is never split.
+    /// [`write()`] ignores it.
     pub target_fragment_bytes: usize,
     /// The most fragments that [`crate::NdWriter`] writes at the same time.
     pub write_parallelism: usize,

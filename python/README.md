@@ -199,7 +199,9 @@ with lance_nd.create("data.lance", casting="safe") as writer:
 ### Fragments
 
 A writer buffers datasets and writes them as Lance fragments of about
-128 MiB in memory, with up to 4 fragment writes at the same time.
+128 MiB on disk, with up to 4 fragment writes at the same time. The writer
+estimates the size on disk from the fragments it wrote, so the sizes are
+not exact. `Table.compact()` gives exact sizes.
 `create()` and `append()` take `target_fragment_bytes` and
 `write_parallelism` to change these limits. `Table.num_fragments` gives
 the number of fragments.

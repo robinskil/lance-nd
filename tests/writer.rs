@@ -782,3 +782,32 @@ async fn variable_name_with_a_colon() {
             .is_empty()
     );
 }
+
+/// Row `i` with 20,000 zeros: 160 KB in memory, a few bytes on disk.
+fn zeros_row(i: usize) -> NdRecordBatch {
+    let schema = Arc::new(Schema::new(vec![Field::new("v", DataType::Float64, true)]));
+    let values = NdArrowArray::try_new(
+        Arc::new(Float64Array::from(vec![0.0; 20_000])),
+        Dimensions::try_new([("n", 20_000)]).unwrap(),
+    )
+    .unwrap();
+    NdRecordBatch::try_new_inferred(schema, vec![values])
+        .unwrap()
+        .with_attributes(Attributes::new().with("id", i as i64))
+}
+
+#[tokio::test]
+async fn fragment_target_learns_the_size_on_disk() {
+    let dir = tempfile::tempdir().unwrap();
+    let options = WriteOptions {
+        target_fragment_bytes: 256 << 10,
+        write_parallelism: 1,
+        ..Default::default()
+    };
+    let rows_in: Vec<NdRecordBatch> = (0..200).map(zeros_row).collect();
+    let dataset = write_one_by_one(&uri(&dir), rows_in, &options).await;
+    // By memory size, a fragment would end every two rows.
+    let fragments = dataset.get_fragments().len();
+    assert!((2..=30).contains(&fragments), "{fragments} fragments");
+    assert_eq!(dataset.count_rows(None).await.unwrap(), 200);
+}

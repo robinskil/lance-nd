@@ -30,7 +30,8 @@ use crate::write::{
 /// A writer that makes all its rows visible in one commit.
 ///
 /// [`NdWriter::write`] buffers rows. When the buffer has about
-/// [`WriteOptions::target_fragment_bytes`], a Tokio task writes it as one
+/// [`WriteOptions::target_fragment_bytes`] on disk, as estimated from the
+/// fragments written so far, a Tokio task writes it as one
 /// Lance fragment, and up to [`WriteOptions::write_parallelism`] fragments
 /// are written at the same time. Readers do not see the fragments.
 /// [`NdWriter::finish`] writes the rest and commits all of them in one new
@@ -60,9 +61,12 @@ pub struct NdWriter {
     /// Rows for the next fragment, and their size in memory.
     buffer: Vec<RecordBatch>,
     buffered_bytes: usize,
-    /// Fragment writes that run, in the order of their rows.
-    pending: VecDeque<JoinHandle<Result<Vec<Fragment>>>>,
+    /// Fragment writes that run, in the order of their rows, with the
+    /// size of their rows in memory.
+    pending: VecDeque<(JoinHandle<Result<Vec<Fragment>>>, usize)>,
     fragments: Vec<Fragment>,
+    /// The bytes in memory and on disk of the fragments written so far.
+    written: DiskRatio,
     /// The error of a failed fragment write. `finish` then fails too.
     failed: Option<String>,
 }
@@ -99,6 +103,7 @@ impl NdWriter {
             buffered_bytes: 0,
             pending: VecDeque::new(),
             fragments: Vec::new(),
+            written: DiskRatio::default(),
             failed: None,
         })
     }
@@ -124,6 +129,7 @@ impl NdWriter {
             buffered_bytes: 0,
             pending: VecDeque::new(),
             fragments: Vec::new(),
+            written: DiskRatio::default(),
             failed: None,
         })
     }
@@ -259,7 +265,7 @@ impl NdWriter {
         }
         self.buffered_bytes += batch.get_array_memory_size();
         self.buffer.push(batch);
-        if self.buffered_bytes >= self.options.target_fragment_bytes {
+        if self.written.on_disk(self.buffered_bytes) >= self.options.target_fragment_bytes as f64 {
             let result = self.flush().await;
             return self.fail_on(result);
         }
@@ -274,7 +280,7 @@ impl NdWriter {
         }
         self.evolve().await?;
         let batches = std::mem::take(&mut self.buffer);
-        self.buffered_bytes = 0;
+        let memory = std::mem::take(&mut self.buffered_bytes);
         let (arrow, lance) = self.schema.as_ref().expect("a buffered row has a schema");
         // Only the columns of the buffered rows: the other columns read as
         // null. Rows of one buffer often share a schema.
@@ -291,7 +297,7 @@ impl NdWriter {
         let projected =
             lance.project_by_schema(present.as_ref(), OnMissing::Error, OnTypeMismatch::Error)?;
         let uri = self.uri.clone();
-        self.pending.push_back(tokio::spawn(async move {
+        let task = tokio::spawn(async move {
             let params = WriteParams {
                 mode: WriteMode::Append,
                 data_storage_version: Some(FILE_VERSION),
@@ -303,7 +309,8 @@ impl NdWriter {
                 .write_params(&params)
                 .write_fragments(reader)
                 .await?)
-        }));
+        });
+        self.pending.push_back((task, memory));
         while self.pending.len() > self.options.write_parallelism.max(1) {
             self.wait_oldest().await?;
         }
@@ -342,12 +349,13 @@ impl NdWriter {
 
     /// Wait for the oldest fragment write and keep its fragments.
     async fn wait_oldest(&mut self) -> Result<()> {
-        let Some(task) = self.pending.pop_front() else {
+        let Some((task, memory)) = self.pending.pop_front() else {
             return Ok(());
         };
         let fragments = task.await.map_err(|error| {
             Error::InvalidArgument(format!("a fragment write failed: {error}"))
         })??;
+        self.written.add(memory, &fragments);
         self.fragments.extend(fragments);
         Ok(())
     }
@@ -451,9 +459,47 @@ impl NdWriter {
     /// Drop all written rows without a commit. Stops the fragment writes
     /// that run.
     pub fn abort(self) {
-        for task in &self.pending {
+        for (task, _) in &self.pending {
             task.abort();
         }
+    }
+}
+
+/// The bytes in memory and on disk of the written fragments, to estimate
+/// the size on disk of the buffered rows.
+#[derive(Debug, Default)]
+struct DiskRatio {
+    memory: u64,
+    disk: u64,
+}
+
+impl DiskRatio {
+    /// The lowest ratio of bytes on disk to bytes in memory. It limits the
+    /// buffer to 8 times the target, for data that compresses very well.
+    const MIN: f64 = 1.0 / 8.0;
+
+    /// Count the rows of `memory` bytes that became `fragments`. A data file
+    /// of unknown size counts nothing.
+    fn add(&mut self, memory: usize, fragments: &[Fragment]) {
+        let files = fragments.iter().flat_map(|fragment| fragment.files.iter());
+        let sizes: Option<Vec<u64>> = files
+            .map(|file| file.file_size_bytes.get().map(|size| size.get()))
+            .collect();
+        if let Some(sizes) = sizes {
+            self.memory += memory as u64;
+            self.disk += sizes.iter().sum::<u64>();
+        }
+    }
+
+    /// The estimated bytes on disk of `memory` bytes in memory. Before the
+    /// first fragment, the bytes in memory.
+    fn on_disk(&self, memory: usize) -> f64 {
+        let ratio = if self.memory == 0 {
+            1.0
+        } else {
+            (self.disk as f64 / self.memory as f64).max(Self::MIN)
+        };
+        memory as f64 * ratio
     }
 }
 

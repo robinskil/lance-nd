@@ -306,6 +306,10 @@ A write that fails a check, for example a type change, is rejected, and the
 `NdWriter` stays usable. `finish` commits the other rows. A failed fragment
 write makes the writer fail, and `finish` then commits nothing.
 
+An append `NdWriter` adds new variables and attribute keys to the table
+before it writes the first fragment with them, so readers can see new empty
+columns before `finish`. `finish` then commits a plain append.
+
 `NdWriter` buffers rows and writes them as Lance fragments of about 128 MiB
 in memory, with up to 4 fragment writes at the same time. A larger row gets
 a fragment of its own. `WriteOptions::target_fragment_bytes` and

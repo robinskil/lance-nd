@@ -233,7 +233,8 @@ async fn type_change_rejects_only_its_rows() {
         .unwrap();
     assert!(writer.write(rows(vec![sst_f32()])).await.is_err());
     let dataset = writer.finish().await.unwrap();
-    assert_eq!(dataset.version().version, version + 1);
+    // One commit adds the new variable, one appends the rows.
+    assert_eq!(dataset.version().version, version + 2);
     assert_eq!(dataset.count_rows(None).await.unwrap(), 3);
 }
 
@@ -343,7 +344,8 @@ async fn concurrent_schema_change() {
     // Lance 11 rejects the second schema change: two merges conflict.
     assert!(second.finish().await.is_err());
     let dataset = Dataset::open(&uri).await.unwrap();
-    assert_eq!(dataset.version().version, version + 1);
+    // The first writer adds its variable, then appends its rows.
+    assert_eq!(dataset.version().version, version + 2);
     assert_eq!(dataset.count_rows(None).await.unwrap(), 2);
 }
 
@@ -643,4 +645,48 @@ async fn many_varying_variables_round_trip() {
         .map(|row| format!("{:?}", row.attributes()))
         .collect();
     assert_eq!(pruned.len(), 3, "{ids:?}");
+}
+
+#[tokio::test]
+async fn append_with_new_fields_commits_an_append() {
+    use lance::dataset::transaction::Operation;
+    let dir = tempfile::tempdir().unwrap();
+    let options = WriteOptions {
+        stats: true,
+        target_fragment_bytes: 64 << 10,
+        ..Default::default()
+    };
+    let first: Vec<NdRecordBatch> = (0..10).map(varied_row).collect();
+    let dataset = write_one_by_one(&uri(&dir), first.clone(), &options).await;
+    let version = dataset.version().version;
+
+    // New variables, attribute keys and stats children, in several fragments.
+    let later: Vec<NdRecordBatch> = (10..300).map(varied_row).collect();
+    let mut writer = NdWriter::append(&uri(&dir), &options).await.unwrap();
+    for row in &later {
+        writer.write(rows(vec![row.clone()])).await.unwrap();
+    }
+    let dataset = writer.finish().await.unwrap();
+    let transaction = dataset.read_transaction().await.unwrap().unwrap();
+    assert!(
+        matches!(transaction.operation, Operation::Append { .. }),
+        "{:?}",
+        transaction.operation
+    );
+    assert!(dataset.version().version > version + 1);
+
+    let rows_in: Vec<NdRecordBatch> = first.into_iter().chain(later).collect();
+    let rows_out = read_all(&dataset).await;
+    assert_eq!(rows_out.len(), rows_in.len());
+    for (i, (out, expected)) in rows_out.iter().zip(&rows_in).enumerate() {
+        assert_eq!(out.attributes(), expected.attributes(), "row {i}");
+        for field in expected.schema().fields() {
+            assert_eq!(
+                out.column_by_name(field.name()),
+                expected.column_by_name(field.name()),
+                "row {i} {}",
+                field.name()
+            );
+        }
+    }
 }

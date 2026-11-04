@@ -10,7 +10,7 @@ use futures::Stream;
 use lance::Dataset;
 use lance::dataset::fragment::write::FragmentCreateBuilder;
 use lance::dataset::transaction::{Operation, Transaction};
-use lance::dataset::{CommitBuilder, WriteMode, WriteParams};
+use lance::dataset::{CommitBuilder, NewColumnTransform, WriteMode, WriteParams};
 use lance::table::format::Fragment;
 use lance_core::datatypes::{OnMissing, OnTypeMismatch, Schema as LanceSchema};
 use nd_arrow_array::NdRecordBatch;
@@ -20,7 +20,7 @@ use crate::cast::Casting;
 use crate::encode::{RowDecoder, encode_rows};
 use crate::error::{Error, Result};
 use crate::options::ColumnOptions;
-use crate::schema::{concat_conformed, holds_schema, merge_schemas, used_fields};
+use crate::schema::{concat_conformed, holds_schema, merge_schemas, missing_fields, used_fields};
 use crate::stats::STATS_FIELD;
 use crate::widen::{promotions, widen};
 use crate::write::{
@@ -36,6 +36,10 @@ use crate::write::{
 /// [`NdWriter::finish`] writes the rest and commits all of them in one new
 /// table version, in the order of the rows. The writer must run on a Tokio
 /// runtime.
+///
+/// An append writer adds new fields to the table before it writes the first
+/// fragment with them, so readers can see new empty columns before
+/// [`NdWriter::finish`]. `finish` then commits a plain append.
 ///
 /// A writer that is aborted or dropped commits nothing. Its data files stay
 /// until a Lance cleanup removes them. One exception: under
@@ -262,6 +266,7 @@ impl NdWriter {
         if self.buffer.is_empty() {
             return Ok(());
         }
+        self.evolve().await?;
         let batches = std::mem::take(&mut self.buffer);
         self.buffered_bytes = 0;
         let (arrow, lance) = self.schema.as_ref().expect("a buffered row has a schema");
@@ -296,6 +301,36 @@ impl NdWriter {
         while self.pending.len() > self.options.write_parallelism.max(1) {
             self.wait_oldest().await?;
         }
+        Ok(())
+    }
+
+    /// Add the staged fields that the table lacks to the table, as all-null
+    /// columns, and take the field ids of the table. Fragments then always
+    /// use the ids of the table.
+    ///
+    /// Lance validates a Merge commit in a time that grows with the square of
+    /// the schema fields, which takes minutes with thousands of variables.
+    /// `add_columns` skips that validation.
+    async fn evolve(&mut self) -> Result<()> {
+        let (Some(base), Some((arrow, _))) = (self.base.as_mut(), self.schema.as_ref()) else {
+            return Ok(());
+        };
+        if self.overwrite {
+            return Ok(());
+        }
+        let missing = missing_fields(Schema::from(base.schema()).fields(), arrow.fields());
+        if missing.is_empty() {
+            return Ok(());
+        }
+        // Boxed: the add_columns future is large, and would grow the future
+        // of each write beyond the compiler's layout depth.
+        Box::pin(base.add_columns(
+            NewColumnTransform::AllNulls(Arc::new(Schema::new(missing))),
+            None,
+            None,
+        ))
+        .await?;
+        self.schema = Some((Schema::from(base.schema()), base.schema().clone()));
         Ok(())
     }
 

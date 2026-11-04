@@ -57,7 +57,7 @@ pub struct NdWriter {
     /// Fragment writes that run, in the order of their rows.
     pending: VecDeque<JoinHandle<Result<Vec<Fragment>>>>,
     fragments: Vec<Fragment>,
-    /// The error of a failed write. `finish` then fails too.
+    /// The error of a failed fragment write. `finish` then fails too.
     failed: Option<String>,
 }
 
@@ -124,24 +124,31 @@ impl NdWriter {
 
     /// Write a stream of rows, without a commit. Each nd record batch is one row.
     ///
-    /// A failed write makes the writer fail: [`NdWriter::finish`] then
-    /// commits nothing.
+    /// The writer encodes the rows in groups, see [`WriteOptions`]. A group
+    /// that fails a check, for example a type change, is rejected: the
+    /// writer returns the error and stays usable, and the groups before it
+    /// stay written. A failed fragment write makes the writer fail:
+    /// [`NdWriter::finish`] then commits nothing.
     pub async fn write(&mut self, rows: impl Stream<Item = Result<NdRecordBatch>>) -> Result<()> {
         self.check()?;
-        let result = self.write_rows(rows).await;
-        self.fail_on(result)
+        let mut rows = pin!(rows);
+        while let Some(group) = next_group(&mut rows, &self.options).await? {
+            let batch = encode_group(&group, &self.defaults, &self.options, self.stats)?;
+            self.push(batch).await?;
+        }
+        Ok(())
     }
 
     /// Write the rows of an encoded record batch, without a commit.
     ///
     /// `batch` holds nd columns and an optional `__global_attrs__` column,
     /// as [`crate::encode::encode_rows`] gives them. The writer checks the
-    /// columns, but it does not decode the rows. A failed write makes the
-    /// writer fail.
+    /// columns, but it does not decode the rows. A batch that fails a check
+    /// is rejected as a whole, and the writer stays usable. A failed
+    /// fragment write makes the writer fail.
     pub async fn write_batch(&mut self, batch: RecordBatch) -> Result<()> {
         self.check()?;
-        let result = self.write_encoded(batch).await;
-        self.fail_on(result)
+        self.write_encoded(batch).await
     }
 
     fn check(&self) -> Result<()> {
@@ -158,15 +165,6 @@ impl NdWriter {
             self.failed = Some(error.to_string());
         }
         result
-    }
-
-    async fn write_rows(&mut self, rows: impl Stream<Item = Result<NdRecordBatch>>) -> Result<()> {
-        let mut rows = pin!(rows);
-        while let Some(group) = next_group(&mut rows, &self.options).await? {
-            let batch = encode_group(&group, &self.defaults, &self.options, self.stats)?;
-            self.push(batch).await?;
-        }
-        Ok(())
     }
 
     async fn write_encoded(&mut self, batch: RecordBatch) -> Result<()> {
@@ -186,6 +184,9 @@ impl NdWriter {
 
     /// Grow the staged schema with `batch`, then buffer it. A full buffer
     /// becomes a fragment.
+    ///
+    /// A schema conflict changes nothing, so it only rejects `batch`. A
+    /// failed fragment write makes the writer fail.
     async fn push(&mut self, batch: RecordBatch) -> Result<()> {
         let (arrow, lance) = match &self.schema {
             Some((arrow, lance)) => (
@@ -203,7 +204,8 @@ impl NdWriter {
         self.buffered_bytes += batch.get_array_memory_size();
         self.buffer.push(batch);
         if self.buffered_bytes >= self.options.target_fragment_bytes {
-            self.flush().await?;
+            let result = self.flush().await;
+            return self.fail_on(result);
         }
         Ok(())
     }

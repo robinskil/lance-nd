@@ -134,11 +134,11 @@ def _dataset_row(ds: xr.Dataset) -> tuple[dict[str, _Variable], dict[Hashable, A
             raise ValueError(f"the variable name '{name}' is reserved")
         if "coordinates" in var.attrs:
             raise ValueError(f"variable '{name}' already has a 'coordinates' attribute")
-        attrs = dict(var.attrs)
+        attrs = _non_empty(var.attrs)
         if coordinates.get(name):
             attrs["coordinates"] = " ".join(coordinates[name])
         variables[name] = (_values(name, var), [str(d) for d in var.dims], var.shape, attrs)
-    attrs = dict(ds.attrs)
+    attrs = _non_empty(ds.attrs)
     unlisted = [name for name in _other_coordinates(ds) if name not in listed]
     if unlisted:
         attrs["coordinates"] = " ".join(unlisted)
@@ -231,6 +231,18 @@ def _attrs_struct(rows: list[dict[Hashable, Any]], owner: str) -> pa.StructArray
         values = [row[key][1] if key in row else None for row in encoded]
         arrays.append(pa.array(values, type=arrow_type))
     return pa.StructArray.from_arrays(arrays, names=keys)
+
+
+def _non_empty(attrs: dict[Hashable, Any]) -> dict[Hashable, Any]:
+    """``attrs`` without empty arrays, which hold no value."""
+    return {key: value for key, value in attrs.items() if not _is_empty(value)}
+
+
+def _is_empty(value: Any) -> bool:
+    """``True`` for an attribute with no items, such as ``[]``."""
+    if isinstance(value, np.ndarray):
+        return value.ndim == 1 and value.size == 0
+    return isinstance(value, list | tuple) and len(value) == 0
 
 
 def _attr(key: str, value: Any) -> tuple[pa.DataType, Any]:

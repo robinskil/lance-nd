@@ -69,7 +69,11 @@ Rules:
   the block does not finish again. `writer.table` holds the committed table.
 - `finish()` on a new table without datasets raises an error. On an append
   without datasets, it makes no commit.
-- A failed `write()` makes the writer fail. `finish()` then commits nothing.
+- A `write()` that fails a check, for example a variable or an attribute
+  with another type than in the table, raises `LanceNdError` and writes none
+  of its datasets. The writer stays usable, and `finish()` commits the other
+  datasets. A failed data file write makes the writer fail, and `finish()`
+  then commits nothing.
 - If another writer adds variables to the table before your `finish()`, and
   your writer also adds variables, `finish()` raises an error.
 - Errors from Rust raise `lance_nd.LanceNdError`.
@@ -242,7 +246,8 @@ attribute. A dataset or variable that already has a `coordinates`
 attribute raises a `ValueError`.
 
 In a list of datasets, one variable must have one value type, and one
-attribute key must have one type. One `write()` call holds at most
+attribute key must have one type. An attribute that is an empty array, such
+as `[]`, holds no value, so the encoder leaves it out. One `write()` call holds at most
 2,147,483,647 values per variable over all its datasets. For more, write
 fewer datasets per call.
 

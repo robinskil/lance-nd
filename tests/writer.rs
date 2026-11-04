@@ -208,20 +208,22 @@ async fn append_without_rows_is_no_commit() {
 }
 
 #[tokio::test]
-async fn type_change_across_writes_fails() {
-    // New table: the type change fails, and no table appears.
+async fn type_change_rejects_only_its_rows() {
+    // New table: the type change is rejected, and the other rows commit.
     let dir = tempfile::tempdir().unwrap();
     let uri = uri(&dir);
     let mut writer = NdWriter::create(&uri, &WriteOptions::default())
         .await
         .unwrap();
     writer.write(rows(vec![sst(2, "a")])).await.unwrap();
-    assert!(writer.write(rows(vec![sst_f32()])).await.is_err());
-    assert!(writer.finish().await.is_err());
-    assert!(Dataset::open(&uri).await.is_err());
+    let error = writer.write(rows(vec![sst_f32()])).await.unwrap_err();
+    assert!(matches!(error, Error::SchemaMismatch(_)), "{error}");
+    writer.write(rows(vec![sst(3, "b")])).await.unwrap();
+    let dataset = writer.finish().await.unwrap();
+    assert_eq!(dataset.count_rows(None).await.unwrap(), 2);
 
-    // Existing table: the type change fails, and the table does not change.
-    let version = table_with_one_row(&uri).await.version().version;
+    // Existing table: the type change is rejected, and the other rows commit.
+    let version = dataset.version().version;
     let mut writer = NdWriter::append(&uri, &WriteOptions::default())
         .await
         .unwrap();
@@ -230,10 +232,57 @@ async fn type_change_across_writes_fails() {
         .await
         .unwrap();
     assert!(writer.write(rows(vec![sst_f32()])).await.is_err());
-    assert!(writer.finish().await.is_err());
-    let dataset = Dataset::open(&uri).await.unwrap();
-    assert_eq!(dataset.version().version, version);
-    assert_eq!(dataset.count_rows(None).await.unwrap(), 1);
+    let dataset = writer.finish().await.unwrap();
+    assert_eq!(dataset.version().version, version + 1);
+    assert_eq!(dataset.count_rows(None).await.unwrap(), 3);
+}
+
+/// `sst(2, title)` with the attribute `resolution` on `sst`.
+fn with_resolution(title: &str, resolution: Attributes) -> NdRecordBatch {
+    let row = sst(2, title);
+    let column = row.column_by_name("sst").unwrap().clone();
+    let schema = Arc::new(Schema::new(vec![Field::new(
+        "sst",
+        DataType::Float64,
+        true,
+    )]));
+    NdRecordBatch::try_new_inferred(schema, vec![column.with_attributes(resolution)])
+        .unwrap()
+        .with_attributes(Attributes::new().with("title", title))
+}
+
+#[tokio::test]
+async fn attribute_type_conflict_rejects_only_its_row() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut writer = NdWriter::create(&uri(&dir), &WriteOptions::default())
+        .await
+        .unwrap();
+    let scalar = |title| with_resolution(title, Attributes::new().with("resolution", 0.5f64));
+    let list = with_resolution("b", Attributes::new().with("resolution", vec![1.0f64, 2.0]));
+    writer
+        .write_batch(encode_rows(&[scalar("a")]).unwrap())
+        .await
+        .unwrap();
+    let error = writer
+        .write_batch(encode_rows(&[list]).unwrap())
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("resolution"), "{error}");
+    writer
+        .write_batch(encode_rows(&[scalar("c")]).unwrap())
+        .await
+        .unwrap();
+    let dataset = writer.finish().await.unwrap();
+    let rows = scan(&dataset).try_collect().await.unwrap();
+    let titles: Vec<String> = rows
+        .iter()
+        .map(|row| format!("{:?}", row.attributes()))
+        .collect();
+    assert_eq!(rows.len(), 2);
+    assert!(
+        titles[0].contains("\"a\"") && titles[1].contains("\"c\""),
+        "{titles:?}"
+    );
 }
 
 #[tokio::test]

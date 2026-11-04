@@ -259,3 +259,34 @@ def test_scan_keeps_the_case_of_names(table_uri):
     table = lance_nd.open(table_uri)
     assert titles(table.scan(prune="TEMP.values > 50")) == ["b"]
     assert titles(table.scan(project=["TEMP"], filter="__global_attrs__.title = 'a'")) == ["a"]
+
+
+def resolution_dataset(title, resolution):
+    ds = dataset(title)
+    ds["sst"].attrs["resolution"] = resolution
+    return ds
+
+
+def test_rejected_write_keeps_the_writer(table_uri):
+    with lance_nd.create(table_uri) as writer:
+        writer.write(resolution_dataset("a", 0.5))
+        with pytest.raises(LanceNdError, match="resolution"):
+            writer.write(resolution_dataset("b", np.array([1.0, 2.0])))
+        writer.write(resolution_dataset("c", 0.25))
+    table = lance_nd.open(table_uri)
+    assert titles(table.scan(project=[])) == ["a", "c"]
+
+
+def test_empty_array_attribute_is_dropped(table_uri):
+    ds = resolution_dataset("b", np.array([], dtype=np.float64))
+    ds.attrs["history"] = []
+    batch = encode(ds)
+    assert "resolution" not in batch.column("sst").type.field("attrs").type.names
+    assert "history" not in batch.column("__global_attrs__").type.names
+    only_empty = xr.Dataset({"x": (("n",), np.array([1.0]), {"res": np.array([])})})
+    assert "attrs" not in only_empty.pipe(encode).column("x").type.names
+    with lance_nd.create(table_uri) as writer:
+        writer.write(resolution_dataset("a", 0.5))
+        writer.write(ds)
+        writer.write(only_empty)
+    assert lance_nd.open(table_uri).count_rows() == 3

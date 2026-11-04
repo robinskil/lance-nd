@@ -1,0 +1,30 @@
+name: Publish to crates.io
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    environment: crates-io
+    permissions:
+      # Trusted publishing gets a short-lived token from this OIDC id.
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      # Lance needs protoc to build.
+      - uses: arduino/setup-protoc@v3
+        with:
+          version: "29.3"
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: rust-lang/crates-io-auth-action@v1
+        id: auth
+      - run: cargo publish -p lance-nd
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}

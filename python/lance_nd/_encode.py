@@ -174,10 +174,13 @@ def _values(name: str, var: xr.Variable) -> pa.Array:
     if kind == "S":
         return pa.array([v.decode("utf-8") for v in flat.tolist()], type=pa.string())
     if kind == "O":
-        # xarray can store a missing string as NaN.
-        items = [None if isinstance(v, float) and np.isnan(v) else v for v in flat.tolist()]
-        if all(v is None or isinstance(v, str) for v in items):
-            return pa.array(items, type=pa.string())
+        # xarray can store a missing string as NaN, which from_pandas makes null.
+        try:
+            array = pa.array(flat, from_pandas=True)
+        except (pa.ArrowInvalid, pa.ArrowTypeError):
+            array = None
+        if array is not None and (pa.types.is_string(array.type) or pa.types.is_null(array.type)):
+            return array.cast(pa.string())
     raise TypeError(f"variable '{name}' has the unsupported dtype {data.dtype}")
 
 

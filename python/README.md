@@ -173,6 +173,26 @@ A writer buffers datasets and writes them as Lance fragments of about
 `write_parallelism` to change these limits. `Table.num_fragments` gives
 the number of fragments.
 
+### Slow NetCDF-4 files on Windows
+
+xarray asks `netCDF4` for the compression filters of each variable of a
+NetCDF-4 file. `netCDF4` then searches the HDF5 filter plugins on disk, and
+on Windows this can take about 30 ms per variable. A file with 100 variables
+then needs several seconds to open. When your files use only the filters
+that HDF5 has built in, such as zlib, set `HDF5_PLUGIN_PATH` to an empty
+folder before you import xarray:
+
+```python
+import os
+
+os.environ["HDF5_PLUGIN_PATH"] = r"C:\empty-folder"
+
+import xarray as xr
+```
+
+A file that needs a plugin filter, such as zstd or blosc, can then fail
+to read. Classic NetCDF-3 files are not affected.
+
 ### Delete and compact
 
 ```python

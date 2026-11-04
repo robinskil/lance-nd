@@ -271,3 +271,24 @@ def test_stats_name_reserved():
     ds = xr.Dataset({"__stats__": (("n",), np.zeros(2))})
     with pytest.raises(ValueError, match="__stats__"):
         encode(ds)
+
+
+def test_object_text_values():
+    ds = xr.Dataset(
+        {
+            "nan": (("n",), np.array(["a", np.nan, "c"], dtype=object)),
+            "none": (("k",), np.array([None, None], dtype=object)),
+        }
+    )
+    batch = encode(ds)
+    assert batch.column("nan")[0].as_py()["values"] == ["a", None, "c"]
+    assert batch.column("none")[0].as_py()["values"] == [None, None]
+    assert batch.column("none").type.field("values").type == pa.list_(pa.string())
+
+
+@pytest.mark.parametrize(
+    "values", [np.array(["a", 1], dtype=object), np.array([b"a"], dtype=object)]
+)
+def test_object_values_must_be_text(values):
+    with pytest.raises(TypeError, match="'m'"):
+        encode(xr.Dataset({"m": (("n",), values)}))

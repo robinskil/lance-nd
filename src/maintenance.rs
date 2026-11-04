@@ -12,6 +12,7 @@ use std::time::Duration;
 use arrow::array::{RecordBatch, RecordBatchIterator};
 use arrow::compute::concat_batches;
 use arrow::datatypes::{Schema, SchemaRef};
+use arrow::error::ArrowError;
 use futures::TryStreamExt;
 use lance::Dataset;
 use lance::dataset::cleanup::RemovalStats;
@@ -81,7 +82,9 @@ impl Default for CompactOptions {
 /// Lance plans the work. Lance selects fragments by rows, so the target in
 /// bytes becomes a target in rows from the mean row size on disk. lance-nd
 /// rewrites each group of fragments as one fragment, and holds the group in
-/// memory. Without work to do, the table keeps its version.
+/// memory. A group with more list or string values than one Arrow array
+/// holds becomes several fragments. Without work to do, the table keeps its
+/// version.
 pub async fn compact(dataset: &mut Dataset, options: &CompactOptions) -> Result<CompactionMetrics> {
     let plan = plan_compaction(dataset, &lance_options(dataset, options).await?).await?;
     let mut metrics = CompactionMetrics::default();
@@ -168,23 +171,49 @@ async fn rewrite(dataset: &Dataset, fragments: &[Fragment]) -> Result<Vec<Fragme
             Ok(RecordBatch::try_new(arrow_schema.clone(), columns)?)
         })
         .collect::<Result<Vec<_>>>()?;
-    // One batch per fragment: Lance 11 fails to read back a fragment of
-    // several batches when a struct column has nulls and large lists.
-    let batch = concat_batches(arrow_schema, &batches)?;
-    if batch.num_rows() == 0 {
-        return Ok(Vec::new());
-    }
     let params = WriteParams {
         mode: WriteMode::Append,
         data_storage_version: Some(FILE_VERSION),
         ..Default::default()
     };
-    let reader = RecordBatchIterator::new([Ok(batch)], arrow_schema.clone());
-    Ok(FragmentCreateBuilder::new(dataset.uri())
-        .schema(lance_schema)
-        .write_params(&params)
-        .write_fragments(reader)
-        .await?)
+    let concat = |part: &[RecordBatch]| concat_batches(arrow_schema, part);
+    let mut new_fragments = Vec::new();
+    // One batch per fragment: Lance 11 fails to read back a fragment of
+    // several batches when a struct column has nulls and large lists.
+    for batch in split_concat(&batches, &concat)? {
+        if batch.num_rows() == 0 {
+            continue;
+        }
+        let reader = RecordBatchIterator::new([Ok(batch)], arrow_schema.clone());
+        new_fragments.extend(
+            FragmentCreateBuilder::new(dataset.uri())
+                .schema(lance_schema)
+                .write_params(&params)
+                .write_fragments(reader)
+                .await?,
+        );
+    }
+    Ok(new_fragments)
+}
+
+/// `batches` joined by `concat` into as few batches as possible, in order.
+///
+/// A list or a string array holds at most `i32::MAX` values. When the join
+/// overflows that limit, each half of `batches` is joined on its own.
+fn split_concat(
+    batches: &[RecordBatch],
+    concat: &impl Fn(&[RecordBatch]) -> Result<RecordBatch, ArrowError>,
+) -> Result<Vec<RecordBatch>> {
+    match concat(batches) {
+        Ok(batch) => Ok(vec![batch]),
+        Err(ArrowError::OffsetOverflowError(_)) if batches.len() > 1 => {
+            let (first, second) = batches.split_at(batches.len() / 2);
+            let mut parts = split_concat(first, concat)?;
+            parts.extend(split_concat(second, concat)?);
+            Ok(parts)
+        }
+        Err(error) => Err(error.into()),
+    }
 }
 
 /// `true` when `held` has the id of `field` or of a field in it. A data file
@@ -221,4 +250,44 @@ async fn lance_options(dataset: &Dataset, options: &CompactOptions) -> Result<Co
 pub async fn cleanup_old_versions(dataset: &Dataset, older_than: Duration) -> Result<RemovalStats> {
     let older_than = chrono::Duration::from_std(older_than).unwrap_or(chrono::Duration::MAX);
     Ok(dataset.cleanup_old_versions(older_than, None, None).await?)
+}
+
+#[cfg(test)]
+mod tests {
+    use arrow::array::{AsArray, Int64Array};
+    use arrow::datatypes::{DataType, Field, Int64Type};
+
+    use super::*;
+
+    fn batch(id: i64) -> RecordBatch {
+        let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, false)]));
+        RecordBatch::try_new(schema, vec![Arc::new(Int64Array::from(vec![id]))]).unwrap()
+    }
+
+    fn ids(batch: &RecordBatch) -> Vec<i64> {
+        batch.column(0).as_primitive::<Int64Type>().values().to_vec()
+    }
+
+    #[test]
+    fn concat_splits_on_offset_overflow() {
+        let batches: Vec<RecordBatch> = (0..5).map(batch).collect();
+        let schema = batches[0].schema();
+        // More than two batches overflow, as a large list column does.
+        let concat = |part: &[RecordBatch]| {
+            if part.len() > 2 {
+                return Err(ArrowError::OffsetOverflowError(part.len()));
+            }
+            concat_batches(&schema, part)
+        };
+        let parts = split_concat(&batches, &concat).unwrap();
+        let parts: Vec<Vec<i64>> = parts.iter().map(ids).collect();
+        assert_eq!(parts, [vec![0, 1], vec![2], vec![3, 4]]);
+    }
+
+    #[test]
+    fn concat_keeps_other_errors() {
+        let batches: Vec<RecordBatch> = (0..2).map(batch).collect();
+        let concat = |_: &[RecordBatch]| Err(ArrowError::ComputeError("no".into()));
+        assert!(split_concat(&batches, &concat).is_err());
+    }
 }

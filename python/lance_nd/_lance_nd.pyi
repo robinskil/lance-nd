@@ -5,7 +5,7 @@ from collections.abc import Iterator
 
 import pyarrow as pa
 
-from lance_nd._typing import ColumnOptions, Mode
+from lance_nd._typing import Casting, ColumnOptions, Mode
 
 class LanceNdError(Exception):
     """An error from lance-nd or Lance."""
@@ -22,12 +22,14 @@ class Writer:
         stats: bool = False,
         target_fragment_bytes: int | None = None,
         write_parallelism: int | None = None,
+        casting: Casting = "no",
     ) -> Writer:
         """A writer for a new table. ``mode`` is "create" or "overwrite".
 
         ``stats`` stores the min and max of each variable per row.
         ``target_fragment_bytes`` and ``write_parallelism`` override the
         fragment size and the number of parallel fragment writes.
+        ``casting`` is "no", "safe" or "same_kind", see ``lance_nd.create``.
         """
 
     @staticmethod
@@ -36,6 +38,7 @@ class Writer:
         column_options: dict[str, ColumnOptions] | None = None,
         target_fragment_bytes: int | None = None,
         write_parallelism: int | None = None,
+        casting: Casting = "no",
     ) -> Writer:
         """A writer that appends to an existing table."""
 

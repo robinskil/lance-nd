@@ -19,8 +19,8 @@ use lance_nd::datafusion::prelude::{SessionConfig, SessionContext};
 use lance_nd::encode::encode_rows;
 use lance_nd::stats::has_stats;
 use lance_nd::{
-    ByteStreamSplit, ColumnOptions, CompactOptions, Compression, NdWriter, StructuralEncoding,
-    WriteMode, WriteOptions, scan, variables,
+    ByteStreamSplit, Casting, ColumnOptions, CompactOptions, Compression, NdWriter,
+    StructuralEncoding, WriteMode, WriteOptions, scan, variables,
 };
 use nd_arrow_array::NdRecordBatch;
 use pyo3::create_exception;
@@ -68,7 +68,8 @@ impl Writer {
 #[pymethods]
 impl Writer {
     /// A writer for a new table. `mode` is "create" or "overwrite".
-    /// `stats` stores the min and max of each variable per row.
+    /// `stats` stores the min and max of each variable per row. `casting`
+    /// is "no", "safe" or "same_kind".
     #[staticmethod]
     #[pyo3(signature = (
         uri,
@@ -78,6 +79,7 @@ impl Writer {
         stats = false,
         target_fragment_bytes = None,
         write_parallelism = None,
+        casting = "no",
     ))]
     #[allow(clippy::too_many_arguments)]
     fn create(
@@ -89,6 +91,7 @@ impl Writer {
         stats: bool,
         target_fragment_bytes: Option<usize>,
         write_parallelism: Option<usize>,
+        casting: &str,
     ) -> PyResult<Self> {
         let mode = match mode {
             "create" => WriteMode::Create,
@@ -105,6 +108,7 @@ impl Writer {
                 column_defaults: column_defaults.map(parse_options).transpose()?,
                 column_options: parse_column_options(column_options)?,
                 stats,
+                casting: parse_casting(casting)?,
                 ..Default::default()
             },
             target_fragment_bytes,
@@ -119,17 +123,25 @@ impl Writer {
 
     /// A writer that appends to an existing table.
     #[staticmethod]
-    #[pyo3(signature = (uri, column_options = None, target_fragment_bytes = None, write_parallelism = None))]
+    #[pyo3(signature = (
+        uri,
+        column_options = None,
+        target_fragment_bytes = None,
+        write_parallelism = None,
+        casting = "no",
+    ))]
     fn append(
         py: Python<'_>,
         uri: String,
         column_options: Option<&Bound<'_, PyDict>>,
         target_fragment_bytes: Option<usize>,
         write_parallelism: Option<usize>,
+        casting: &str,
     ) -> PyResult<Self> {
         let options = fragment_options(
             WriteOptions {
                 column_options: parse_column_options(column_options)?,
+                casting: parse_casting(casting)?,
                 ..Default::default()
             },
             target_fragment_bytes,
@@ -381,6 +393,15 @@ fn _scan_batch(py: Python<'_>, uri: String) -> PyResult<PyArrowType<RecordBatch>
 }
 
 /// `options` with the fragment size and the write parallelism, when given.
+fn parse_casting(casting: &str) -> PyResult<Casting> {
+    match casting {
+        "no" => Ok(Casting::No),
+        "safe" => Ok(Casting::Safe),
+        "same_kind" => Ok(Casting::SameKind),
+        other => Err(invalid("casting", other, "'no', 'safe' or 'same_kind'")),
+    }
+}
+
 fn fragment_options(
     mut options: WriteOptions,
     target_fragment_bytes: Option<usize>,

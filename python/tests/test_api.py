@@ -290,3 +290,44 @@ def test_empty_array_attribute_is_dropped(table_uri):
         writer.write(ds)
         writer.write(only_empty)
     assert lance_nd.open(table_uri).count_rows() == 3
+
+
+def typed_dataset(title, dtype):
+    return xr.Dataset({"sst": (("time",), np.array([1.5, 2.5], dtype=dtype))}, attrs={"title": title})
+
+
+def sst_types(table):
+    return [str(batch.column("sst").type.field("values").type.value_type) for batch in table.scan()]
+
+
+def test_casting_default_rejects_another_type(table_uri):
+    with lance_nd.create(table_uri) as writer:
+        writer.write(typed_dataset("a", np.float64))
+        with pytest.raises(LanceNdError, match="sst"):
+            writer.write(typed_dataset("b", np.float32))
+    assert lance_nd.open(table_uri).count_rows() == 1
+
+
+def test_casting_safe_widens_new_rows(table_uri):
+    with lance_nd.create(table_uri, stats=True, casting="safe") as writer:
+        writer.write(typed_dataset("a", np.float64))
+        writer.write(typed_dataset("b", np.float32))
+    with lance_nd.append(table_uri, casting="safe") as writer:
+        writer.write(typed_dataset("c", np.int16))
+        with pytest.raises(LanceNdError):
+            writer.write(xr.Dataset({"sst": (("time",), np.array(["x"]))}))
+    table = lance_nd.open(table_uri)
+    assert sst_types(table) == ["double"] * 3
+    assert titles(table.scan(prune="sst.values > 1.5")) == ["a", "b", "c"]
+
+
+def test_casting_same_kind_narrows_new_rows(table_uri):
+    with lance_nd.create(table_uri, casting="same_kind") as writer:
+        writer.write(typed_dataset("a", np.float32))
+        writer.write(typed_dataset("b", np.float64))
+    assert sst_types(lance_nd.open(table_uri)) == ["float", "float"]
+
+
+def test_casting_must_be_known(table_uri):
+    with pytest.raises(ValueError, match="casting"):
+        lance_nd.create(table_uri, casting="unsafe")

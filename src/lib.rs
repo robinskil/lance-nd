@@ -18,6 +18,7 @@
 
 #![warn(missing_docs)]
 
+pub mod cast;
 pub mod encode;
 pub mod error;
 pub mod maintenance;
@@ -29,6 +30,7 @@ pub mod stats;
 pub mod write;
 pub mod writer;
 
+pub use cast::Casting;
 pub use error::{Error, Result};
 pub use lance::dataset::WriteMode;
 pub use lance::dataset::cleanup::RemovalStats;

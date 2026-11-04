@@ -17,14 +17,13 @@ use lance_core::datatypes::{OnMissing, OnTypeMismatch, Schema as LanceSchema};
 use nd_arrow_array::NdRecordBatch;
 use tokio::task::JoinHandle;
 
-use crate::encode::RowDecoder;
+use crate::encode::{RowDecoder, encode_rows};
 use crate::error::{Error, Result};
 use crate::options::ColumnOptions;
 use crate::schema::{conform_batch, merge_schemas};
 use crate::stats::STATS_FIELD;
 use crate::write::{
-    FILE_VERSION, WriteOptions, encode_group, next_group, prepare_batch, table_defaults,
-    table_has_stats,
+    FILE_VERSION, WriteOptions, next_group, prepare_batch, table_defaults, table_has_stats,
 };
 
 /// A writer that makes all its rows visible in one commit.
@@ -133,7 +132,9 @@ impl NdWriter {
         self.check()?;
         let mut rows = pin!(rows);
         while let Some(group) = next_group(&mut rows, &self.options).await? {
-            let batch = encode_group(&group, &self.defaults, &self.options, self.stats)?;
+            let batch = encode_rows(&group)?;
+            let table = self.schema.as_ref().map(|(arrow, _)| arrow);
+            let batch = prepare_batch(batch, &self.defaults, &self.options, self.stats, table)?;
             self.push(batch).await?;
         }
         Ok(())
@@ -178,7 +179,8 @@ impl NdWriter {
         if batch.num_rows() == 0 {
             return Ok(());
         }
-        let batch = prepare_batch(batch, &self.defaults, &self.options, self.stats)?;
+        let table = self.schema.as_ref().map(|(arrow, _)| arrow);
+        let batch = prepare_batch(batch, &self.defaults, &self.options, self.stats, table)?;
         self.push(batch).await
     }
 

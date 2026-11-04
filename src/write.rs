@@ -12,6 +12,7 @@ use lance::dataset::{NewColumnTransform, WriteMode, WriteParams};
 use lance_file::version::LanceFileVersion;
 use nd_arrow_array::NdRecordBatch;
 
+use crate::cast::{Casting, cast_to};
 use crate::encode::encode_rows;
 use crate::error::{Error, Result};
 use crate::options::{ColumnOptions, column_defaults, with_column_options};
@@ -42,6 +43,9 @@ pub struct WriteOptions {
     /// Only a new table or an overwrite reads it. An append writes stats
     /// when the table has them.
     pub stats: bool,
+    /// How a write treats a variable or attribute type that differs from the
+    /// table, see [`Casting`].
+    pub casting: Casting,
     /// [`crate::NdWriter`] buffers rows until they have about this many
     /// bytes in memory, then writes them as one Lance fragment. A larger
     /// row gets a fragment of its own. [`write()`] ignores it.
@@ -59,6 +63,7 @@ impl Default for WriteOptions {
             column_defaults: None,
             column_options: HashMap::new(),
             stats: false,
+            casting: Casting::No,
             target_fragment_bytes: 128 << 20,
             write_parallelism: 4,
         }
@@ -93,7 +98,9 @@ pub async fn write(
     };
     let mut rows = pin!(rows);
     while let Some(group) = next_group(&mut rows, options).await? {
-        let batch = encode_group(&group, &defaults, options, stats)?;
+        let batch = encode_rows(&group)?;
+        let table = dataset.as_ref().map(|d| Schema::from(d.schema()));
+        let batch = prepare_batch(batch, &defaults, options, stats, table.as_ref())?;
         match dataset.as_mut() {
             Some(dataset) => append_batch(dataset, batch).await?,
             None => {
@@ -125,7 +132,10 @@ pub async fn append(
     let stats = table_has_stats(dataset);
     let mut rows = pin!(rows);
     while let Some(group) = next_group(&mut rows, options).await? {
-        append_batch(dataset, encode_group(&group, &defaults, options, stats)?).await?;
+        let batch = encode_rows(&group)?;
+        let table = Schema::from(dataset.schema());
+        let batch = prepare_batch(batch, &defaults, options, stats, Some(&table))?;
+        append_batch(dataset, batch).await?;
     }
     Ok(())
 }
@@ -147,26 +157,20 @@ pub(crate) fn table_has_stats(dataset: &Dataset) -> bool {
     has_stats(&Schema::from(dataset.schema()))
 }
 
-/// Encode one group with the encoding metadata of its columns, and with
-/// stats when `stats` is `true`. The schema metadata holds the defaults and
-/// the stats marker, which a new table stores.
-pub(crate) fn encode_group(
-    group: &[NdRecordBatch],
-    defaults: &ColumnOptions,
-    options: &WriteOptions,
-    stats: bool,
-) -> Result<RecordBatch> {
-    prepare_batch(encode_rows(group)?, defaults, options, stats)
-}
-
-/// `batch` of nd columns with stats when `stats` is `true`, and with the
+/// `batch` of nd columns cast to the types of `table` as
+/// `options.casting` allows, with stats when `stats` is `true`, and with the
 /// encoding metadata of its columns.
 pub(crate) fn prepare_batch(
     mut batch: RecordBatch,
     defaults: &ColumnOptions,
     options: &WriteOptions,
     stats: bool,
+    table: Option<&Schema>,
 ) -> Result<RecordBatch> {
+    // Before the stats, so that they get the table types too.
+    if let Some(table) = table {
+        batch = cast_to(batch, table, options.casting)?;
+    }
     if stats {
         batch = add_stats(&batch)?;
     }

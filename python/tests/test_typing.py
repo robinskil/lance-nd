@@ -17,6 +17,7 @@ writer = lance_nd.create(
     stats=True,
     target_fragment_bytes=64 << 20,
     write_parallelism=2,
+    casting="safe",
 )
 writer.write(xr.Dataset(), chunks=["time"], on_drop="ignore")
 table = writer.finish()
@@ -35,6 +36,7 @@ BAD = """
 import lance_nd
 
 lance_nd.create("t.lance", mode="replace")
+lance_nd.append("t.lance", casting="unsafe")
 lance_nd.append("t.lance", column_options={"sst": {"compression": "gzip"}})
 count: str = lance_nd.open("t.lance").count_rows()
 """

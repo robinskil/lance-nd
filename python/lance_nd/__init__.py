@@ -3,9 +3,10 @@
 from lance_nd._api import Scanner, Table, Writer, append, create, open
 from lance_nd._encode import encode, encode_chunks
 from lance_nd._lance_nd import LanceNdError
-from lance_nd._typing import ColumnOptions, Mode, OnDrop
+from lance_nd._typing import Casting, ColumnOptions, Mode, OnDrop
 
 __all__ = [
+    "Casting",
     "ColumnOptions",
     "LanceNdError",
     "Mode",

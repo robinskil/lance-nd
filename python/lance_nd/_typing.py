@@ -3,6 +3,7 @@
 from typing import Literal, TypedDict
 
 Mode = Literal["create", "overwrite"]
+Casting = Literal["no", "safe", "same_kind"]
 OnDrop = Literal["warn", "raise", "ignore"]
 
 

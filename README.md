@@ -94,7 +94,8 @@ For example, a table with three nd record batches:
 - A null in a row means that the nd record batch of that row does not have
   that array. A reader leaves it out of the row.
 - One array name has one value type in a table. A write that changes the type
-  fails.
+  fails, unless `WriteOptions::casting` allows a cast, see
+  [Casting](#casting).
 
 ### Schema evolution
 
@@ -104,6 +105,24 @@ rows. Older rows read the new arrays as absent.
 
 Lance can add nested fields only with file version 2.2 or later, so lance-nd
 creates tables with file version 2.2.
+
+### Casting
+
+`WriteOptions::casting` decides what a write does with a variable or an
+attribute that has another type than the table. The rules follow the
+`casting` argument of numpy:
+
+| `Casting` | A different type |
+|---|---|
+| `No` (default) | Rejects the write. |
+| `Safe` | Casts the new values when no value can change, for example `Float32` to `Float64` or `UInt16` to `Int32`. |
+| `SameKind` | Also casts within a kind, or to a later kind in the order bool, unsigned, signed, float, for example `Float64` to `Float32`. An integer that does not fit fails the write. |
+
+The table type always wins: a cast changes the new rows, never the table.
+So with `Safe`, a `Float64` variable cannot go into a `Float32` table. The
+cast comes before the stats, so the stats get the table type too. An
+attribute with a number in one row and an array in another row is never
+cast.
 
 ### Rows and chunks
 

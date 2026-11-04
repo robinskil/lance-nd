@@ -8,7 +8,7 @@ import xarray as xr
 
 from lance_nd import _lance_nd
 from lance_nd._encode import encode, encode_chunks
-from lance_nd._typing import ColumnOptions, Mode, OnDrop
+from lance_nd._typing import Casting, ColumnOptions, Mode, OnDrop
 
 Table = _lance_nd.Table
 Scanner = _lance_nd.Scanner
@@ -100,11 +100,18 @@ def create(
     stats: bool = False,
     target_fragment_bytes: int | None = None,
     write_parallelism: int | None = None,
+    casting: Casting = "no",
 ) -> Writer:
     """A writer for a new table. ``mode`` is "create" or "overwrite".
 
     ``stats`` stores the min and max of each variable per row, so that a
     scan can skip rows. An append follows the table.
+
+    ``casting`` decides what happens when a variable or attribute has
+    another type than the table, as the numpy ``casting`` argument: "no"
+    rejects the write, "safe" casts the new values when no value can change,
+    such as float32 to float64, and "same_kind" also casts within a kind,
+    such as float64 to float32. The table type always wins.
 
     The writer buffers datasets until they have about
     ``target_fragment_bytes`` (default 128 MiB) in memory, then writes them
@@ -119,6 +126,7 @@ def create(
         stats,
         target_fragment_bytes,
         write_parallelism,
+        casting,
     )
     return Writer(native)
 
@@ -128,11 +136,12 @@ def append(
     column_options: dict[str, ColumnOptions] | None = None,
     target_fragment_bytes: int | None = None,
     write_parallelism: int | None = None,
+    casting: Casting = "no",
 ) -> Writer:
     """A writer that appends to an existing table. See :func:`create` for
-    the fragment options."""
+    the fragment options and ``casting``."""
     native = _lance_nd.Writer.append(
-        uri, column_options, target_fragment_bytes, write_parallelism
+        uri, column_options, target_fragment_bytes, write_parallelism, casting
     )
     return Writer(native)
 

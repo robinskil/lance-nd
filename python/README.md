@@ -71,7 +71,8 @@ Rules:
   without datasets, it makes no commit.
 - A `write()` that fails a check, for example a variable or an attribute
   with another type than in the table, raises `LanceNdError` and writes none
-  of its datasets. The writer stays usable, and `finish()` commits the other
+  of its datasets. `create()` and `append()` take `casting` to cast such
+  types instead, see [Casting](#casting). The writer stays usable, and `finish()` commits the other
   datasets. A failed data file write makes the writer fail, and `finish()`
   then commits nothing.
 - If another writer adds variables to the table before your `finish()`, and
@@ -164,6 +165,28 @@ for batch in table.scan(
   all datasets. `filter` and `prune` can be used together.
 - `limit`, `batch_size` and `batch_size_bytes` limit the rows and the Lance
   batches that the scan reads.
+
+### Casting
+
+`create()` and `append()` take `casting`, as the numpy `casting`
+argument. It decides what happens when a variable or an attribute has
+another type than the table:
+
+- `"no"` (default): the write raises `LanceNdError`.
+- `"safe"`: the writer casts the new values when no value can change, for
+  example float32 to float64, or int16 to float64.
+- `"same_kind"`: the writer also casts within a kind, for example float64
+  to float32. An integer that does not fit raises `LanceNdError`.
+
+The table type always wins, so the first dataset with a variable sets its
+type. To keep all values exact, write the widest type first, or widen the
+values before the write.
+
+```python
+with lance_nd.create("data.lance", casting="safe") as writer:
+    writer.write(ds_float64)
+    writer.write(ds_float32)   # sst becomes float64
+```
 
 ### Fragments
 

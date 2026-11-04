@@ -1,11 +1,12 @@
 //! Per-row min and max values of each variable, for pruning.
 //!
-//! A table with stats has the schema metadata key [`STATS_METADATA_KEY`] and
-//! a `__stats__` column. The column has one child per variable with a stats
-//! type. Each child is a struct of `min` and `max`, typed by the value type.
-//! A null child means that the row does not have the variable. Null and NaN
-//! values do not count. A variable without counted values has null `min`
-//! and `max`.
+//! A table with stats has the schema metadata key [`STATS_METADATA_KEY`]. Each
+//! variable with a stats type has a stats column `__stats__:<variable>`, a
+//! struct of `min` and `max` typed by the value type. A writer adds a variable
+//! and its stats column together, so an older fragment lacks whole columns
+//! only, which Lance reads as null. A null row means that the row does not
+//! have the variable. Null and NaN values do not count. A variable without
+//! counted values has null `min` and `max`.
 
 use std::cmp::Ordering;
 use std::sync::Arc;
@@ -25,18 +26,40 @@ use nd_arrow_array::extension::{VALUES_FIELD, is_nd_field};
 
 use crate::error::Result;
 
-/// The name of the stats column. It is a reserved variable name.
-pub const STATS_FIELD: &str = "__stats__";
+/// The name prefix of the stats columns. Each variable name that starts with
+/// it is reserved.
+pub const STATS_PREFIX: &str = "__stats__";
 
 /// The table schema metadata key that marks a table with stats.
 pub const STATS_METADATA_KEY: &str = "lance_nd:stats";
+
+/// The value of [`STATS_METADATA_KEY`] for the layout with one stats column
+/// per variable.
+const STATS_LAYOUT: &str = "2";
 
 /// `true` when the schema marks a table with stats.
 pub fn has_stats(schema: &Schema) -> bool {
     schema
         .metadata()
         .get(STATS_METADATA_KEY)
-        .is_some_and(|value| value == "true")
+        .is_some_and(|value| value == STATS_LAYOUT)
+}
+
+/// The name of the stats column of `variable`.
+pub fn stats_column(variable: &str) -> String {
+    // Lance 11 does not allow `.` in a top-level name.
+    format!("{STATS_PREFIX}:{variable}")
+}
+
+/// The variable of the stats column `column`, or `None` for another name.
+pub fn stats_variable(column: &str) -> Option<&str> {
+    column.strip_prefix(STATS_PREFIX)?.strip_prefix(':')
+}
+
+/// `true` for a reserved name: a stats column or another name that starts
+/// with [`STATS_PREFIX`].
+pub fn is_stats_name(name: &str) -> bool {
+    name.starts_with(STATS_PREFIX)
 }
 
 /// `true` when values of `data_type` get a min and a max.
@@ -57,13 +80,14 @@ pub fn is_stats_type(data_type: &DataType) -> bool {
         )
 }
 
-/// `batch` with a `__stats__` column and the stats marker in its metadata.
+/// `batch` with a stats column for each variable of a stats type, and the
+/// stats marker in its metadata.
 ///
 /// `batch` is an encoded batch of nd columns. Without a variable of a stats
 /// type, only the marker is added.
 pub fn add_stats(batch: &RecordBatch) -> Result<RecordBatch> {
-    let mut children: Vec<Field> = Vec::new();
-    let mut arrays: Vec<ArrayRef> = Vec::new();
+    let mut fields: Vec<Arc<Field>> = batch.schema().fields().iter().cloned().collect();
+    let mut columns = batch.columns().to_vec();
     for (field, column) in batch.schema().fields().iter().zip(batch.columns()) {
         if !is_nd_field(field) {
             continue;
@@ -82,24 +106,14 @@ pub fn add_stats(batch: &RecordBatch) -> Result<RecordBatch> {
             Field::new("min", value_type.clone(), true),
             Field::new("max", value_type, true),
         ]);
-        let child = StructArray::try_new(bounds.clone(), vec![min, max], nd.nulls().cloned())?;
-        children.push(Field::new(field.name(), DataType::Struct(bounds), true));
-        arrays.push(Arc::new(child));
+        let stats = StructArray::try_new(bounds.clone(), vec![min, max], nd.nulls().cloned())?;
+        let name = stats_column(field.name());
+        fields.push(Arc::new(Field::new(name, DataType::Struct(bounds), true)));
+        columns.push(Arc::new(stats));
     }
 
     let mut metadata = batch.schema().metadata().clone();
-    metadata.insert(STATS_METADATA_KEY.to_string(), "true".to_string());
-    let mut fields: Vec<Arc<Field>> = batch.schema().fields().iter().cloned().collect();
-    let mut columns = batch.columns().to_vec();
-    if !children.is_empty() {
-        let children = Fields::from(children);
-        fields.push(Arc::new(Field::new(
-            STATS_FIELD,
-            DataType::Struct(children.clone()),
-            true,
-        )));
-        columns.push(Arc::new(StructArray::try_new(children, arrays, None)?));
-    }
+    metadata.insert(STATS_METADATA_KEY.to_string(), STATS_LAYOUT.to_string());
     let schema = Schema::new_with_metadata(fields, metadata);
     Ok(RecordBatch::try_new(Arc::new(schema), columns)?)
 }

@@ -53,12 +53,9 @@ fn value_type(dataset: &Dataset, variable: &str) -> DataType {
 
 fn stats_type(dataset: &Dataset, variable: &str) -> DataType {
     let schema = Schema::from(dataset.schema());
-    let DataType::Struct(children) = schema.field_with_name("__stats__").unwrap().data_type()
-    else {
-        panic!("stats are a struct");
-    };
-    let DataType::Struct(bounds) = children.find(variable).unwrap().1.data_type() else {
-        panic!("a stats child is a struct");
+    let column = format!("__stats__:{variable}");
+    let DataType::Struct(bounds) = schema.field_with_name(&column).unwrap().data_type() else {
+        panic!("a stats column is a struct");
     };
     bounds.find("min").unwrap().1.data_type().clone()
 }

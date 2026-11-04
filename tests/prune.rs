@@ -3,7 +3,7 @@ use lance::deps::datafusion::common::Column;
 use lance::deps::datafusion::functions::core::expr_fn::{get_field, get_field_path};
 use lance::deps::datafusion::logical_expr::{Expr, col, lit};
 use lance_nd::prune::prune_filter;
-use lance_nd::stats::STATS_FIELD;
+use lance_nd::stats::stats_column;
 
 fn bounds(data_type: DataType) -> DataType {
     DataType::Struct(Fields::from(vec![
@@ -22,12 +22,21 @@ fn table(with_stats: bool) -> Schema {
         Field::new("__global_attrs__", DataType::Struct(Fields::empty()), true),
     ];
     if with_stats {
-        let children = Fields::from(vec![
-            Field::new("lat", bounds(DataType::Float64), true),
-            Field::new("name", bounds(DataType::Utf8), true),
-            Field::new("a.b", bounds(DataType::Int32), true),
-        ]);
-        fields.push(Field::new(STATS_FIELD, DataType::Struct(children), true));
+        fields.push(Field::new(
+            stats_column("lat"),
+            bounds(DataType::Float64),
+            true,
+        ));
+        fields.push(Field::new(
+            stats_column("name"),
+            bounds(DataType::Utf8),
+            true,
+        ));
+        fields.push(Field::new(
+            stats_column("a.b"),
+            bounds(DataType::Int32),
+            true,
+        ));
     }
     Schema::new(fields)
 }
@@ -46,7 +55,7 @@ fn names_are_not_checked() {
     assert!(prune(values("latt").gt(lit(1.0))).unwrap().is_none());
     for form in [
         units("latt").eq(lit("K")),
-        col(STATS_FIELD).is_not_null(),
+        col(Column::new_unqualified(stats_column("lat"))).is_not_null(),
         col("lat").gt(lit(1.0)),
     ] {
         assert_eq!(prune(form.clone()).unwrap(), Some(form.clone()), "{form}");
@@ -78,7 +87,7 @@ fn supported_forms_rewrite() {
         let text = rewritten
             .unwrap_or_else(|| panic!("{form} keeps"))
             .to_string();
-        assert!(text.contains(STATS_FIELD), "{form} -> {text}");
+        assert!(text.contains("__stats__:"), "{form} -> {text}");
     }
 }
 

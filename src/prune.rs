@@ -27,20 +27,16 @@ use lance::deps::datafusion::logical_expr::{Expr, Operator, col};
 use nd_arrow_array::extension::GLOBAL_ATTRIBUTES_FIELD;
 
 use crate::error::Result;
-use crate::stats::STATS_FIELD;
+use crate::stats::stats_column;
 
 /// A filter for a scan of `table` with the rows that can match `expr`.
 ///
 /// See the [module](self) documentation for the forms. `None` means that
 /// every row is kept.
 pub fn prune_filter(expr: &Expr, table: &Schema) -> Result<Option<Expr>> {
-    let children = match table.field_with_name(STATS_FIELD).map(|f| f.data_type()) {
-        Ok(DataType::Struct(children)) => Some(children),
-        _ => None,
-    };
     let value_type = |name: &str| {
-        let (_, child) = children?.find(name)?;
-        match child.data_type() {
+        let stats = table.field_with_name(&stats_column(name)).ok()?;
+        match stats.data_type() {
             DataType::Struct(bounds) => bounds.find("min").map(|(_, f)| f.data_type().clone()),
             _ => None,
         }
@@ -183,7 +179,7 @@ impl Stats {
     fn of(expr: &Expr, value_type: &ValueType<'_>) -> Option<Self> {
         let name = values_of(expr)?;
         let value_type = value_type(&name)?;
-        let child = get_field(col(Column::new_unqualified(STATS_FIELD)), name);
+        let child = col(Column::new_unqualified(stats_column(&name)));
         Some(Self(child, value_type))
     }
 

@@ -13,7 +13,8 @@ import xarray as xr
 from lance_nd._typing import OnDrop
 
 GLOBAL_ATTRS = "__global_attrs__"
-STATS = "__stats__"
+# Each name that starts with it is reserved for the stats columns.
+STATS_PREFIX = "__stats__"
 ND_ARRAY_METADATA = {
     b"ARROW:extension:name": b"nd_arrow.array",
     b"ARROW:extension:metadata": b'{"version":1}',
@@ -143,8 +144,11 @@ def _dataset_row(
     variables = {}
     for name, var in ds.variables.items():
         name = str(name)
-        if name in (GLOBAL_ATTRS, STATS):
-            raise ValueError(f"the variable name '{name}' is reserved")
+        if name == GLOBAL_ATTRS or name.startswith(STATS_PREFIX):
+            raise ValueError(
+                f"the variable name '{name}' is reserved, also each name that "
+                f"starts with {STATS_PREFIX}"
+            )
         if "coordinates" in var.attrs:
             raise ValueError(f"variable '{name}' already has a 'coordinates' attribute")
         attrs = _non_empty(var.attrs)

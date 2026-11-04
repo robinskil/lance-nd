@@ -5,6 +5,7 @@
 //! Both make a new table version. The files of old versions stay on disk
 //! until [`cleanup_old_versions`] removes them.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -22,7 +23,6 @@ use lance::dataset::write::delete::DeleteBuilder;
 use lance::dataset::{CommitBuilder, WriteMode, WriteParams};
 use lance::deps::datafusion::logical_expr::Expr;
 use lance::table::format::Fragment;
-use lance_core::datatypes::Schema as LanceSchema;
 
 use crate::error::Result;
 use crate::schema::{conform_batch, fill_hidden_nulls};
@@ -88,11 +88,9 @@ pub async fn compact(dataset: &mut Dataset, options: &CompactOptions) -> Result<
     if plan.tasks.is_empty() {
         return Ok(metrics);
     }
-    let lance_schema = dataset.schema().clone();
-    let arrow_schema = Arc::new(Schema::from(&lance_schema));
     let mut groups = Vec::with_capacity(plan.tasks.len());
     for task in &plan.tasks {
-        let new_fragments = rewrite(dataset, &task.fragments, &arrow_schema, &lance_schema).await?;
+        let new_fragments = rewrite(dataset, &task.fragments).await?;
         metrics.fragments_removed += task.fragments.len();
         metrics.files_removed += task
             .fragments
@@ -135,13 +133,26 @@ pub async fn compact(dataset: &mut Dataset, options: &CompactOptions) -> Result<
 }
 
 /// The rows of `fragments`, written again as new fragments without ids.
-async fn rewrite(
-    dataset: &Dataset,
-    fragments: &[Fragment],
-    arrow_schema: &SchemaRef,
-    lance_schema: &LanceSchema,
-) -> Result<Vec<Fragment>> {
+///
+/// The new fragments hold only the top-level columns that `fragments` hold,
+/// as a writer writes them. The others read as null.
+async fn rewrite(dataset: &Dataset, fragments: &[Fragment]) -> Result<Vec<Fragment>> {
+    let held: HashSet<i32> = fragments
+        .iter()
+        .flat_map(|fragment| fragment.files.iter())
+        .flat_map(|file| file.fields.iter().copied())
+        .collect();
+    let names: Vec<&str> = dataset
+        .schema()
+        .fields
+        .iter()
+        .filter(|field| holds(&held, field))
+        .map(|field| field.name.as_str())
+        .collect();
+    let lance_schema = &dataset.schema().project(&names)?;
+    let arrow_schema: &SchemaRef = &Arc::new(Schema::from(lance_schema));
     let mut scanner = dataset.scan();
+    scanner.project(&names)?;
     scanner.with_fragments(fragments.to_vec());
     let batches: Vec<RecordBatch> = scanner.try_into_stream().await?.try_collect().await?;
     let batches = batches
@@ -174,6 +185,12 @@ async fn rewrite(
         .write_params(&params)
         .write_fragments(reader)
         .await?)
+}
+
+/// `true` when `held` has the id of `field` or of a field in it. A data file
+/// lists the ids of leaf fields, not always of their parents.
+fn holds(held: &HashSet<i32>, field: &lance_core::datatypes::Field) -> bool {
+    held.contains(&field.id) || field.children.iter().any(|child| holds(held, child))
 }
 
 /// The Lance compaction options for `options`.

@@ -14,14 +14,14 @@ use nd_arrow_array::extension::GLOBAL_ATTRIBUTES_FIELD;
 use crate::encode::{RowDecoder, variable_field};
 use crate::error::{Error, Result};
 use crate::prune::prune_filter;
-use crate::stats::STATS_FIELD;
+use crate::stats::is_stats_name;
 
 /// The variables of the table, as logical fields typed by their values.
 pub fn variables(dataset: &Dataset) -> Result<Vec<Field>> {
     Schema::from(dataset.schema())
         .fields()
         .iter()
-        .filter(|f| f.name() != GLOBAL_ATTRIBUTES_FIELD && f.name() != STATS_FIELD)
+        .filter(|f| f.name() != GLOBAL_ATTRIBUTES_FIELD && !is_stats_name(f.name()))
         .map(|f| variable_field(f))
         .collect()
 }
@@ -106,7 +106,7 @@ impl NdScanner<'_> {
     /// Lance table columns.
     ///
     /// Lance gets `expr` with no change, so `expr` must use the table
-    /// columns: the nd columns, `__global_attrs__` and `__stats__`. With
+    /// columns: the nd columns, `__global_attrs__` and the stats columns. With
     /// [`NdScanner::filter_expr`], a row must match both filters.
     pub fn lance_filter(mut self, expr: Expr) -> Self {
         self.lance_filter = Some(expr);
@@ -196,7 +196,7 @@ impl NdScanner<'_> {
             let is_column = |name: &str| schema.fields.iter().any(|f| f.name == name);
             if let Some(unknown) = projection
                 .iter()
-                .find(|v| *v == GLOBAL_ATTRIBUTES_FIELD || *v == STATS_FIELD || !is_column(v))
+                .find(|v| *v == GLOBAL_ATTRIBUTES_FIELD || is_stats_name(v) || !is_column(v))
             {
                 return Err(Error::InvalidArgument(format!(
                     "'{unknown}' is not a variable of the table: a projection takes whole variables, not nested fields"

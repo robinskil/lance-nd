@@ -18,7 +18,7 @@ use nd_arrow_array::extension::{VALUES_FIELD, is_nd_field};
 use crate::cast::{Casting, allowed, promote_type};
 use crate::error::{Error, Result};
 use crate::schema::fill_hidden_nulls;
-use crate::stats::STATS_FIELD;
+use crate::stats::stats_column;
 
 /// The name prefix of the temporary columns of [`widen`].
 const TEMPORARY_PREFIX: &str = "__widen__";
@@ -49,11 +49,8 @@ pub async fn widen(dataset: &mut Dataset, variable: &str, to: &DataType) -> Resu
         )));
     }
     let mut columns = vec![(field.clone(), with_value_type(field, to))];
-    if let Ok(stats) = schema.field_with_name(STATS_FIELD)
-        && let DataType::Struct(children) = stats.data_type()
-        && children.find(variable).is_some()
-    {
-        columns.push((stats.clone(), with_stats_type(stats, variable, to)));
+    if let Ok(stats) = schema.field_with_name(&stats_column(variable)) {
+        columns.push((stats.clone(), map_children(stats, |_| to.clone())));
     }
     rewrite(dataset, &columns).await
 }
@@ -131,16 +128,6 @@ fn with_value_type(field: &Field, to: &DataType) -> Field {
 }
 
 /// The stats column with the bounds of `variable` of type `to`.
-fn with_stats_type(stats: &Field, variable: &str, to: &DataType) -> Field {
-    map_children(stats, |child| {
-        if child.name() == variable {
-            map_children(child, |_| to.clone()).data_type().clone()
-        } else {
-            child.data_type().clone()
-        }
-    })
-}
-
 /// Write each old column of `columns` again with the type of its new field.
 async fn rewrite(dataset: &mut Dataset, columns: &[(Field, Field)]) -> Result<()> {
     let temporary: Vec<Field> = columns

@@ -21,7 +21,7 @@ use crate::encode::{RowDecoder, encode_rows};
 use crate::error::{Error, Result};
 use crate::options::ColumnOptions;
 use crate::schema::{concat_conformed, holds_schema, merge_schemas, missing_fields, used_fields};
-use crate::stats::STATS_FIELD;
+use crate::stats::{STATS_PREFIX, is_stats_name};
 use crate::widen::{promotions, widen};
 use crate::write::{
     FILE_VERSION, WriteOptions, next_group, prepare_batch, table_defaults, table_has_stats,
@@ -177,9 +177,15 @@ impl NdWriter {
     }
 
     async fn write_encoded(&mut self, batch: RecordBatch) -> Result<()> {
-        if batch.schema().column_with_name(STATS_FIELD).is_some() {
+        if let Some(field) = batch
+            .schema()
+            .fields()
+            .iter()
+            .find(|field| is_stats_name(field.name()))
+        {
             return Err(Error::SchemaMismatch(format!(
-                "variable name '{STATS_FIELD}' is reserved"
+                "variable name '{}' is reserved, also each name that starts with {STATS_PREFIX}",
+                field.name()
             )));
         }
         // Fails for a column that is not an nd column or the global attributes.

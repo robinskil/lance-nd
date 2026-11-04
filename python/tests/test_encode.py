@@ -269,6 +269,9 @@ def test_too_many_values_raises():
 
 
 def test_stats_name_reserved():
+    for name in ["__stats__:x", "__stats__x"]:
+        with pytest.raises(ValueError, match="__stats__"):
+            encode(xr.Dataset({name: (("n",), np.zeros(2))}))
     ds = xr.Dataset({"__stats__": (("n",), np.zeros(2))})
     with pytest.raises(ValueError, match="__stats__"):
         encode(ds)

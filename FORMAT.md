@@ -93,29 +93,37 @@ that it returns.
 ## 7. Stats
 
 Stats are optional. A table with stats has the table schema metadata key
-`lance_nd:stats = true` and a `__stats__` column. A table without this key
-has no `__stats__` column.
+`lance_nd:stats = 2`. Each variable with stats has one stats column:
 
 | Column | Type | Nullable |
 |---|---|---|
-| `__stats__` | `Struct`, one child per variable with stats | yes |
+| `__stats__:<variable>` | `Struct{min: T, max: T}` | yes |
 
 Rules:
 
-1. A child has the name of its variable and the type
-   `Struct{min: T, max: T}`, where `T` is the value type of the variable.
-   The child and its fields are nullable.
+1. `T` is the value type of the variable. The column, `min` and `max` are
+   nullable.
 2. Integer, float, `Utf8`, `LargeUtf8`, `Utf8View`, `Timestamp`, `Date32`,
-   `Date64`, `Time32`, `Time64` and `Duration` variables get a child. Other
-   variables get none.
+   `Date64`, `Time32`, `Time64` and `Duration` variables get a stats column.
+   Other variables get none.
 3. `min` and `max` are the smallest and the largest value of the variable in
    the row. Null and NaN values do not count. Strings order by UTF-8 bytes.
-4. A null child means that the row does not have the variable.
-5. A valid child with null `min` and `max` means that the row has the
+4. A null row means that the row does not have the variable. A fragment
+   without the column reads as null in each row.
+5. A valid row with null `min` and `max` means that the row has the
    variable, but no value counts.
-6. A table with the key but without a variable that gets a child has no
-   `__stats__` column yet. A later write adds it.
-7. `__stats__` is a reserved array name. A reader leaves the column out of
-   the nd record batches.
+6. A writer adds a stats column in the same schema change as its variable.
+   So a stats column never gets new children, and an older fragment lacks
+   whole columns only.
+7. Each name that starts with `__stats__` is reserved. A reader leaves the
+   stats columns out of the nd record batches.
 8. A writer adds stats to each row when the table has the key. Only the
    create or the overwrite of a table sets the key.
+
+The separator is `:`, because Lance does not allow `.` in a top-level
+name. The variable is the part after the first `:`, so a variable name can
+hold `:` itself. In Lance SQL, the name needs backticks:
+`` `__stats__:sst`.max > 300 ``.
+
+A table with the key value `true` uses an earlier layout with one
+`__stats__` struct. lance-nd reads it as a table without stats.

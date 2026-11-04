@@ -209,7 +209,10 @@ async fn filter_reads_variables_late() {
     for scanner in scans {
         let plan = scanner.explain_plan(true).await.unwrap();
         let columns = filter_read(&plan);
-        assert!(!columns.contains("temp"), "{columns}\n{plan}");
+        assert!(
+            !columns.split(", ").any(|c| c == "temp"),
+            "{columns}\n{plan}"
+        );
     }
     let rows = scan(&dataset)
         .project(&["temp"])

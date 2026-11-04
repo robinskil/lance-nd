@@ -128,8 +128,8 @@ def test_create_with_stats(table_uri):
         writer.write(dataset("a"))
     table = lance_nd.open(table_uri)
     assert table.has_stats
-    assert "__stats__" not in table.variables()
-    assert "__stats__" not in _scan_batch(table_uri).schema.names
+    assert not any(name.startswith("__stats__") for name in table.variables())
+    assert not any(name.startswith("__stats__") for name in _scan_batch(table_uri).schema.names)
 
 
 def test_stats_off_by_default(table_uri):

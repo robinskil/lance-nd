@@ -60,13 +60,9 @@ async fn values(dataset: &Dataset) -> Vec<ArrayRef> {
 
 fn stats_type(dataset: &Dataset) -> DataType {
     let schema = Schema::from(dataset.schema());
-    let DataType::Struct(children) = schema.field_with_name("__stats__").unwrap().data_type()
+    let DataType::Struct(bounds) = schema.field_with_name("__stats__:v").unwrap().data_type()
     else {
-        panic!("stats are a struct");
-    };
-    let (_, child) = children.find("v").unwrap();
-    let DataType::Struct(bounds) = child.data_type() else {
-        panic!("a stats child is a struct");
+        panic!("a stats column is a struct");
     };
     bounds.find("min").unwrap().1.data_type().clone()
 }

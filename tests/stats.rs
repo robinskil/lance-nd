@@ -6,7 +6,7 @@ use arrow::array::{
 };
 use arrow::datatypes::{DataType, Field, Float64Type, Int32Type, Schema, TimeUnit};
 use lance_nd::encode::encode_rows;
-use lance_nd::stats::{STATS_FIELD, add_stats, has_stats};
+use lance_nd::stats::{STATS_PREFIX, add_stats, has_stats, is_stats_name, stats_column};
 use nd_arrow_array::{Dimensions, NdArrowArray, NdRecordBatch};
 
 /// One row with the given 1-D variables, each on its own dimension.
@@ -31,12 +31,19 @@ fn stats_of(rows: &[NdRecordBatch]) -> RecordBatch {
 
 fn child<'a>(batch: &'a RecordBatch, variable: &str) -> &'a StructArray {
     batch
-        .column_by_name(STATS_FIELD)
-        .expect("a __stats__ column")
+        .column_by_name(&stats_column(variable))
+        .expect("a stats column")
         .as_struct()
-        .column_by_name(variable)
-        .expect("a stats child")
-        .as_struct()
+}
+
+/// The names of the stats columns of `schema`.
+fn stats_names(schema: &Schema) -> Vec<String> {
+    schema
+        .fields()
+        .iter()
+        .map(|f| f.name().clone())
+        .filter(|name| is_stats_name(name))
+        .collect()
 }
 
 fn min_max(child: &StructArray) -> (&ArrayRef, &ArrayRef) {
@@ -159,15 +166,14 @@ fn other_types_get_no_child() {
         ("flag", Arc::new(BooleanArray::from(vec![true, false]))),
         ("v", Arc::new(Int32Array::from(vec![1]))),
     ])]);
-    let stats = batch.column_by_name(STATS_FIELD).unwrap().as_struct();
-    assert!(stats.column_by_name("flag").is_none());
-    assert!(stats.column_by_name("v").is_some());
+    assert_eq!(stats_names(&batch.schema()), ["__stats__:v"]);
+    assert_eq!(stats_column("v"), format!("{STATS_PREFIX}:v"));
 
     let only_flags = stats_of(&[row(vec![(
         "flag",
         Arc::new(BooleanArray::from(vec![true])),
     )])]);
-    assert!(only_flags.column_by_name(STATS_FIELD).is_none());
+    assert!(stats_names(&only_flags.schema()).is_empty());
     assert!(has_stats(only_flags.schema().as_ref()));
 }
 
@@ -198,10 +204,12 @@ mod tables {
         }
     }
 
+    /// All stats columns of the table.
     async fn stats_column(dataset: &Dataset) -> RecordBatch {
+        let names = stats_names(&Schema::from(dataset.schema()));
         dataset
             .scan()
-            .project(&[STATS_FIELD])
+            .project(&names)
             .unwrap()
             .try_into_batch()
             .await
@@ -237,7 +245,7 @@ mod tables {
         writer.write(rows(vec![lat_row(vec![1.0])])).await.unwrap();
         let dataset = writer.finish().await.unwrap();
         assert!(!table_has_stats(&dataset));
-        assert!(dataset.schema().field(STATS_FIELD).is_none());
+        assert!(stats_names(&Schema::from(dataset.schema())).is_empty());
     }
 
     #[tokio::test]
@@ -269,7 +277,7 @@ mod tables {
         writer.write(rows(vec![lat_row(vec![2.0])])).await.unwrap();
         let dataset = writer.finish().await.unwrap();
         assert!(!table_has_stats(&dataset));
-        assert!(dataset.schema().field(STATS_FIELD).is_none());
+        assert!(stats_names(&Schema::from(dataset.schema())).is_empty());
     }
 
     #[tokio::test]
@@ -360,7 +368,7 @@ mod tables {
             .collect();
         assert_eq!(names, ["lat"]);
         let error = scan(&dataset)
-            .project(&[STATS_FIELD])
+            .project(&["__stats__:lat"])
             .try_into_stream()
             .await
             .err();
@@ -377,9 +385,14 @@ mod tables {
     }
 
     #[test]
-    fn stats_name_is_reserved() {
-        let bad = row(vec![(STATS_FIELD, Arc::new(Int32Array::from(vec![1])))]);
-        assert!(matches!(encode_rows(&[bad]), Err(Error::SchemaMismatch(_))));
+    fn stats_names_are_reserved() {
+        for name in ["__stats__", "__stats__:lat", "__stats__x"] {
+            let bad = row(vec![(name, Arc::new(Int32Array::from(vec![1])))]);
+            assert!(
+                matches!(encode_rows(&[bad]), Err(Error::SchemaMismatch(_))),
+                "{name}"
+            );
+        }
     }
 }
 

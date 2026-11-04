@@ -41,8 +41,8 @@ lance-nd is a general way to store N-dimensional array data in a
 
 The Lance table schema **is** the nd-arrow encoding. lance-nd adds no extra
 columns and no private layout, so any Arrow or Lance reader can read the data.
-The one exception is opt-in: a table with stats has one extra `__stats__`
-column, see [Stats](#stats).
+The one exception is opt-in: a table with stats has one extra
+`__stats__:<variable>` column per variable, see [Stats](#stats).
 
 ## Data model
 
@@ -131,7 +131,7 @@ cast. `Promote` widens only variable values; attributes follow `Safe`.
 `widen(&mut table, "sst", &DataType::Float64)` changes the value type of a
 variable in the table, and the type of its stats. The new type must hold
 each old value exactly, as `Safe` allows. Lance 11 cannot cast a nested
-field in place, so lance-nd writes the variable and the stats column again
+field in place, so lance-nd writes the variable and its stats column again
 as new columns, drops the old ones and renames the new ones. The other
 variables stay as they are.
 
@@ -153,13 +153,19 @@ __global_attrs__.id = 'a'
 ### Stats
 
 A table created with `WriteOptions { stats: true, .. }` stores the min and the
-max of each variable per row, in one extra `__stats__` column. It has one
-child per variable, `__stats__.<variable>.min` and `.max`. Null and NaN
-values do not count. Numeric, string, timestamp, date, time and duration
-variables get stats. An append writes stats when the table has them.
+max of each variable per row. Each variable gets one stats column,
+`__stats__:<variable>`, with `min` and `max`. Null and NaN values do not
+count. Numeric, string, timestamp, date, time and duration variables get
+stats. An append writes stats when the table has them.
+
+A writer adds a variable and its stats column together. So a fragment holds
+only the stats columns of its own rows, and a stats filter also works on
+older fragments without the variable. In Lance SQL, the column name needs
+backticks: `` `__stats__:sst`.max ``.
 
 `lance_nd::datafusion` is the DataFusion version of Lance. Use it to build
-filters. Older lance-nd releases cannot read a table with stats.
+filters. A table from an earlier lance-nd release, with one `__stats__`
+struct, reads as a table without stats. Write it again to get stats.
 
 ### Pruning
 

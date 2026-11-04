@@ -488,7 +488,8 @@ async fn write_batch_takes_encoded_rows() {
     writer.write(rows(vec![sst(4, "b")])).await.unwrap();
     let dataset = writer.finish().await.unwrap();
     assert!(has_stats(&Schema::from(dataset.schema())));
-    assert!(dataset.schema().field("__stats__").is_some());
+    assert!(dataset.schema().field("__stats__:sst").is_some());
+    assert!(dataset.schema().field("__stats__:pressure").is_some());
     let read = read_all(&dataset).await;
     assert_eq!(read.len(), 3);
     assert_eq!(read[0].column_by_name("sst").unwrap().len(), 2);
@@ -675,6 +676,19 @@ async fn append_with_new_fields_commits_an_append() {
     );
     assert!(dataset.version().version > version + 1);
 
+    // A stats filter on a variable that only later fragments have.
+    let filter = lance_nd::datafusion::functions::core::expr_fn::get_field(
+        lance_nd::datafusion::logical_expr::col("v33"),
+        "values",
+    )
+    .gt(lance_nd::datafusion::logical_expr::lit(100.0));
+    let pruned = scan(&dataset)
+        .filter_expr(filter)
+        .try_collect()
+        .await
+        .unwrap();
+    assert_eq!(pruned.len(), 5);
+
     let rows_in: Vec<NdRecordBatch> = first.into_iter().chain(later).collect();
     let rows_out = read_all(&dataset).await;
     assert_eq!(rows_out.len(), rows_in.len());
@@ -689,4 +703,82 @@ async fn append_with_new_fields_commits_an_append() {
             );
         }
     }
+}
+
+/// The ids of the leaf fields of `field`, as a data file lists them.
+fn field_ids(field: &lance_core::datatypes::Field) -> Vec<i32> {
+    if field.children.is_empty() {
+        return vec![field.id];
+    }
+    field.children.iter().flat_map(field_ids).collect()
+}
+
+#[tokio::test]
+async fn fragments_hold_only_their_stats_columns() {
+    let dir = tempfile::tempdir().unwrap();
+    let options = WriteOptions {
+        stats: true,
+        target_fragment_bytes: 1,
+        ..Default::default()
+    };
+    let rows_in = vec![sst(2, "a"), station_var("pressure")];
+    let dataset = write_one_by_one(&uri(&dir), rows_in, &options).await;
+    let fragments = dataset.get_fragments();
+    assert_eq!(fragments.len(), 2);
+    let pressure = field_ids(dataset.schema().field("__stats__:pressure").unwrap());
+    let sst_stats = field_ids(dataset.schema().field("__stats__:sst").unwrap());
+    let ids = |i: usize| -> Vec<i32> {
+        fragments[i]
+            .metadata()
+            .files
+            .iter()
+            .flat_map(|file| file.fields.iter().copied())
+            .collect()
+    };
+    assert!(sst_stats.iter().all(|id| ids(0).contains(id)));
+    assert!(pressure.iter().all(|id| !ids(0).contains(id)));
+    assert!(pressure.iter().all(|id| ids(1).contains(id)));
+    assert!(sst_stats.iter().all(|id| !ids(1).contains(id)));
+}
+
+#[tokio::test]
+async fn variable_name_with_a_colon() {
+    let dir = tempfile::tempdir().unwrap();
+    let options = WriteOptions {
+        stats: true,
+        ..Default::default()
+    };
+    let dataset = write_one_by_one(&uri(&dir), vec![station_var("TEMP:qc")], &options).await;
+    assert!(dataset.schema().field("__stats__:TEMP:qc").is_some());
+    assert_eq!(
+        lance_nd::stats::stats_variable("__stats__:TEMP:qc"),
+        Some("TEMP:qc")
+    );
+    let values = lance_nd::datafusion::functions::core::expr_fn::get_field(
+        lance_nd::datafusion::logical_expr::col(
+            lance_nd::datafusion::common::Column::new_unqualified("TEMP:qc"),
+        ),
+        "values",
+    );
+    let low = values
+        .clone()
+        .gt(lance_nd::datafusion::logical_expr::lit(0.0));
+    let high = values.gt(lance_nd::datafusion::logical_expr::lit(1000.0));
+    assert_eq!(
+        scan(&dataset)
+            .filter_expr(low)
+            .try_collect()
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(
+        scan(&dataset)
+            .filter_expr(high)
+            .try_collect()
+            .await
+            .unwrap()
+            .is_empty()
+    );
 }

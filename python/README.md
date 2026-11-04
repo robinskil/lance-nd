@@ -134,8 +134,11 @@ lance_nd.create(
 ### Stats
 
 `create(uri, stats=True)` stores the min and the max of each variable per
-row. A scan with `prune` uses them to skip rows. An append follows the
-table. `Table.has_stats` tells if a table stores stats.
+row, in one column `__stats__:<variable>` for each variable. A scan with
+`prune` uses them to skip rows. An append follows the table.
+`Table.has_stats` tells if a table stores stats. A table from an earlier
+lance-nd release reads as a table without stats; write it again to get
+stats. Each variable name that starts with `__stats__` is reserved.
 
 ### Read
 
@@ -185,7 +188,7 @@ another type than the table:
 With `"no"`, `"safe"` and `"same_kind"`, the table type always wins, so the
 first dataset with a variable sets its type. `Table.widen("sst",
 pa.float64())` widens a variable of an existing table. It writes that
-variable and the stats column again, not the whole table.
+variable and its stats column again, not the whole table.
 
 ```python
 with lance_nd.create("data.lance", casting="safe") as writer:

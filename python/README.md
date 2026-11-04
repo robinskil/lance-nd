@@ -237,9 +237,10 @@ table.cleanup_old_versions(timedelta(days=7))
 
 - `delete()` takes an exact Lance SQL filter and returns the number of
   deleted datasets.
-- `compact()` merges small fragments and removes deleted datasets. It takes
-  `target_fragment_bytes` (default 128 MiB on disk) and `deleted_fraction`
-  (default 0.1).
+- `compact()` merges small fragments, splits large fragments and removes
+  deleted datasets. It takes `target_fragment_bytes` (default 128 MiB on
+  disk) and `deleted_fraction` (default 0.1). The new fragments are about
+  the same size, near the target.
 - `cleanup_old_versions()` removes the files of versions older than
   `older_than` (default 14 days). Until then, deletes and compactions free
   no disk space.

@@ -317,7 +317,7 @@ impl Table {
         block_on(py, lance_nd::delete(&mut self.dataset, &predicate)).map_err(to_py)
     }
 
-    /// Merge small fragments and remove deleted datasets.
+    /// Merge small fragments, split large fragments and remove deleted datasets.
     #[pyo3(signature = (target_fragment_bytes = None, deleted_fraction = None))]
     fn compact(
         &mut self,

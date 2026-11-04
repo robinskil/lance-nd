@@ -290,7 +290,7 @@ The main functions:
 | `variables(&table)` | List the array columns of the table. |
 | `column_defaults` and `set_column_defaults` | Read and change the encoding defaults for new columns. |
 | `delete` and `delete_expr` | Delete the rows that match an exact predicate. |
-| `compact` and `cleanup_old_versions` | Merge small fragments, remove deleted rows and free disk space. |
+| `compact` and `cleanup_old_versions` | Merge small fragments, split large fragments, remove deleted rows and free disk space. |
 
 `project` takes whole variables, such as `temperature`, not nested fields
 such as `temperature.attrs.units`. Each row keeps all of its global
@@ -350,9 +350,14 @@ cleanup_old_versions(&table, Duration::from_secs(7 * 24 * 60 * 60)).await?;
   because a stats filter keeps rows that do not match. A filter on values
   must be exact, for example `array_has(sst.values, 5.0)`.
 - A delete marks rows in deletion files. It does not rewrite data files.
-- `compact` merges fragments smaller than about 128 MiB on disk, and writes
-  again each fragment with at least 10% deleted rows. `CompactOptions`
-  changes these limits. lance-nd holds one group of fragments in memory at
+- `compact` aims for fragments of 128 MiB on disk. It merges neighboring
+  fragments below half of the target, splits fragments above twice the
+  target, and writes again each fragment with at least 10% deleted rows.
+  Each run of these fragments becomes fragments of about the same size.
+  `CompactOptions` changes these limits.
+- The plan estimates the size of a row from the size of its fragment on
+  disk, so the new sizes are not exact. A second `compact` evens them out.
+  A row is never split. lance-nd holds about one new fragment in memory at
   a time. The row order stays.
 - Each delete and compaction makes a new table version. The files of old
   versions stay on disk until `cleanup_old_versions` removes them. A reader

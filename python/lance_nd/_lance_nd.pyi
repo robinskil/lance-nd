@@ -124,12 +124,13 @@ class Table:
         target_fragment_bytes: int | None = None,
         deleted_fraction: float | None = None,
     ) -> dict[str, int]:
-        """Merge small fragments and remove deleted datasets.
+        """Merge small fragments, split large fragments and remove deleted datasets.
 
-        A fragment smaller than about ``target_fragment_bytes`` on disk
-        (default 128 MiB) is merged with its neighbors. A fragment with at
-        least ``deleted_fraction`` deleted datasets (default 0.1) is written
-        again without them. Returns the counts ``fragments_removed``,
+        The target is ``target_fragment_bytes`` on disk (default 128 MiB).
+        A fragment below half the target is merged with its small neighbors.
+        A fragment above twice the target is split. A fragment with at least
+        ``deleted_fraction`` deleted datasets (default 0.1) is written again
+        without them. Returns the counts ``fragments_removed``,
         ``fragments_added``, ``files_removed`` and ``files_added``.
         """
 

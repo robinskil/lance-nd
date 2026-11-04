@@ -160,6 +160,35 @@ async fn compact_merges_fragments_and_drops_deleted_rows() {
 }
 
 #[tokio::test]
+async fn compact_splits_a_large_fragment_by_size() {
+    let dir = tempfile::tempdir().unwrap();
+    let uri = dir.path().join("table.lance").to_str().unwrap().to_string();
+    let mut writer = NdWriter::create(&uri, &WriteOptions::default()).await.unwrap();
+    writer
+        .write(stream::iter((0..12).map(|id| Ok(row(id)))))
+        .await
+        .unwrap();
+    let mut dataset = writer.finish().await.unwrap();
+    assert_eq!(dataset.get_fragments().len(), 1);
+    let expected: Vec<NdRecordBatch> = scan(&dataset).try_collect().await.unwrap();
+
+    // Far below the size of one row: each row becomes a fragment.
+    let options = CompactOptions {
+        target_fragment_bytes: 16,
+        ..Default::default()
+    };
+    let metrics = compact(&mut dataset, &options).await.unwrap();
+    assert_eq!(metrics.fragments_removed, 1);
+    assert_eq!(dataset.get_fragments().len(), 12);
+    let rows: Vec<NdRecordBatch> = scan(&dataset).try_collect().await.unwrap();
+    assert_eq!(rows.len(), expected.len());
+    for (row, want) in rows.iter().zip(&expected) {
+        assert_eq!(row.columns(), want.columns());
+        assert_eq!(row.attributes(), want.attributes());
+    }
+}
+
+#[tokio::test]
 async fn compact_keeps_fragments_near_the_target() {
     let dir = tempfile::tempdir().unwrap();
     let mut dataset = table(&dir, 12, false).await;

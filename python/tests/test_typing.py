@@ -8,6 +8,7 @@ GOOD = """
 import datetime
 
 import lance_nd
+import pyarrow as pa
 import xarray as xr
 
 writer = lance_nd.create(
@@ -24,6 +25,7 @@ table = writer.finish()
 version: int = table.version
 names: list[str] = lance_nd.open("t.lance").variables()
 flags: tuple[bool, int] = (table.has_stats, table.num_fragments)
+table.widen("sst", pa.float64())
 deleted: int = table.delete("__global_attrs__.title = 'a'")
 compacted: dict[str, int] = table.compact(target_fragment_bytes=64 << 20, deleted_fraction=0.2)
 removed: dict[str, int] = table.cleanup_old_versions(datetime.timedelta(days=1))

@@ -17,11 +17,13 @@ use lance_core::datatypes::{OnMissing, OnTypeMismatch, Schema as LanceSchema};
 use nd_arrow_array::NdRecordBatch;
 use tokio::task::JoinHandle;
 
+use crate::cast::Casting;
 use crate::encode::{RowDecoder, encode_rows};
 use crate::error::{Error, Result};
 use crate::options::ColumnOptions;
 use crate::schema::{conform_batch, merge_schemas};
 use crate::stats::STATS_FIELD;
+use crate::widen::{promotions, widen};
 use crate::write::{
     FILE_VERSION, WriteOptions, next_group, prepare_batch, table_defaults, table_has_stats,
 };
@@ -37,7 +39,9 @@ use crate::write::{
 /// runtime.
 ///
 /// A writer that is aborted or dropped commits nothing. Its data files stay
-/// until a Lance cleanup removes them.
+/// until a Lance cleanup removes them. One exception: under
+/// [`Casting::Promote`], a write that widens the table first commits the
+/// rows written before it.
 pub struct NdWriter {
     uri: String,
     /// The table at the start, for an append or an overwrite.
@@ -133,6 +137,7 @@ impl NdWriter {
         let mut rows = pin!(rows);
         while let Some(group) = next_group(&mut rows, &self.options).await? {
             let batch = encode_rows(&group)?;
+            self.promote(&batch).await?;
             let table = self.schema.as_ref().map(|(arrow, _)| arrow);
             let batch = prepare_batch(batch, &self.defaults, &self.options, self.stats, table)?;
             self.push(batch).await?;
@@ -179,9 +184,41 @@ impl NdWriter {
         if batch.num_rows() == 0 {
             return Ok(());
         }
+        self.promote(&batch).await?;
         let table = self.schema.as_ref().map(|(arrow, _)| arrow);
         let batch = prepare_batch(batch, &self.defaults, &self.options, self.stats, table)?;
         self.push(batch).await
+    }
+
+    /// Widen the variables of `batch` in the table as [`Casting::Promote`]
+    /// needs. The staged fragments use the old field ids that a widen
+    /// replaces, so the rows written so far are committed first.
+    async fn promote(&mut self, batch: &RecordBatch) -> Result<()> {
+        if self.options.casting != Casting::Promote {
+            return Ok(());
+        }
+        let Some((arrow, _)) = &self.schema else {
+            return Ok(());
+        };
+        let widenings = promotions(batch, arrow);
+        if widenings.is_empty() {
+            return Ok(());
+        }
+        let result = async {
+            let staged =
+                !(self.buffer.is_empty() && self.pending.is_empty() && self.fragments.is_empty());
+            if staged || self.base.is_none() {
+                self.commit().await?;
+            }
+            let dataset = self.base.as_mut().expect("a committed table");
+            for (variable, to) in &widenings {
+                widen(dataset, variable, to).await?;
+            }
+            self.schema = Some((Schema::from(dataset.schema()), dataset.schema().clone()));
+            Ok(())
+        }
+        .await;
+        self.fail_on(result)
     }
 
     /// Grow the staged schema with `batch`, then buffer it. A full buffer
@@ -287,26 +324,31 @@ impl NdWriter {
     /// Without rows, a new table or an overwrite fails, and an append returns
     /// the table unchanged.
     pub async fn finish(mut self) -> Result<Dataset> {
-        if let Some(error) = self.failed {
+        if let Some(error) = &self.failed {
             return Err(Error::InvalidArgument(format!(
                 "an earlier write failed, nothing is committed: {error}"
             )));
         }
+        self.commit().await
+    }
+
+    /// Commit the staged rows. The writer then appends to the new version.
+    async fn commit(&mut self) -> Result<Dataset> {
         self.flush().await?;
         while !self.pending.is_empty() {
             self.wait_oldest().await?;
         }
-        let Some((_, schema)) = self.schema.filter(|_| !self.fragments.is_empty()) else {
-            return match (self.base, self.overwrite) {
-                (Some(dataset), false) => Ok(dataset),
+        let Some((_, schema)) = self.schema.clone().filter(|_| !self.fragments.is_empty()) else {
+            return match (&self.base, self.overwrite) {
+                (Some(dataset), false) => Ok(dataset.clone()),
                 _ => Err(Error::InvalidArgument(format!(
                     "no rows to create the table at {}",
                     self.uri
                 ))),
             };
         };
-        let fragments = self.fragments;
-        let dataset = match (self.base, self.overwrite) {
+        let fragments = std::mem::take(&mut self.fragments);
+        let dataset = match (self.base.take(), self.overwrite) {
             (None, overwrite) => {
                 // Another writer can create the table after `create`.
                 if !overwrite && open_existing(&self.uri).await?.is_some() {
@@ -359,6 +401,9 @@ impl NdWriter {
                     .await?
             }
         };
+        self.base = Some(dataset.clone());
+        self.overwrite = false;
+        self.schema = Some((Schema::from(dataset.schema()), dataset.schema().clone()));
         Ok(dataset)
     }
 

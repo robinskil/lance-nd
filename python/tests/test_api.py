@@ -331,3 +331,28 @@ def test_casting_same_kind_narrows_new_rows(table_uri):
 def test_casting_must_be_known(table_uri):
     with pytest.raises(ValueError, match="casting"):
         lance_nd.create(table_uri, casting="unsafe")
+
+
+def test_widen(table_uri):
+    with lance_nd.create(table_uri, stats=True) as writer:
+        writer.write(typed_dataset("a", np.float32))
+    table = lance_nd.open(table_uri)
+    with pytest.raises(LanceNdError, match="could change"):
+        table.widen("sst", pa.float16())
+    table.widen("sst", pa.float64())
+    assert table.version > 1
+    with lance_nd.append(table_uri) as writer:
+        writer.write(typed_dataset("b", np.float64))
+    table = lance_nd.open(table_uri)
+    assert sst_types(table) == ["double", "double"]
+    assert titles(table.scan(prune="sst.values > 2")) == ["a", "b"]
+
+
+def test_casting_promote_widens_the_table(table_uri):
+    with lance_nd.create(table_uri, stats=True, casting="promote") as writer:
+        writer.write(typed_dataset("a", np.float32))
+        writer.write(typed_dataset("b", np.float64))
+        writer.write(typed_dataset("c", np.float32))
+    table = lance_nd.open(table_uri)
+    assert sst_types(table) == ["double"] * 3
+    assert titles(table.scan(prune="sst.values > 2")) == ["a", "b", "c"]

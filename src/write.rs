@@ -18,6 +18,7 @@ use crate::error::{Error, Result};
 use crate::options::{ColumnOptions, column_defaults, with_column_options};
 use crate::schema::{conform_batch, merge_schemas, missing_fields};
 use crate::stats::{add_stats, has_stats};
+use crate::widen::promote_table;
 
 /// Lance file version for new tables. Version 2.2 can add nested fields,
 /// which new attribute keys need.
@@ -99,6 +100,9 @@ pub async fn write(
     let mut rows = pin!(rows);
     while let Some(group) = next_group(&mut rows, options).await? {
         let batch = encode_rows(&group)?;
+        if let Some(dataset) = dataset.as_mut() {
+            promote_table(dataset, &batch, options.casting).await?;
+        }
         let table = dataset.as_ref().map(|d| Schema::from(d.schema()));
         let batch = prepare_batch(batch, &defaults, options, stats, table.as_ref())?;
         match dataset.as_mut() {
@@ -133,6 +137,7 @@ pub async fn append(
     let mut rows = pin!(rows);
     while let Some(group) = next_group(&mut rows, options).await? {
         let batch = encode_rows(&group)?;
+        promote_table(dataset, &batch, options.casting).await?;
         let table = Schema::from(dataset.schema());
         let batch = prepare_batch(batch, &defaults, options, stats, Some(&table))?;
         append_batch(dataset, batch).await?;

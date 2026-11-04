@@ -111,7 +111,11 @@ def create(
     another type than the table, as the numpy ``casting`` argument: "no"
     rejects the write, "safe" casts the new values when no value can change,
     such as float32 to float64, and "same_kind" also casts within a kind,
-    such as float64 to float32. The table type always wins.
+    such as float64 to float32. With these, the table type always wins.
+    "promote" follows numpy type promotion: when the new values do not fit,
+    the writer widens the variable in the table to the smallest type that
+    holds both, see :meth:`Table.widen`. A writer first commits the
+    datasets that it wrote before such a widening.
 
     The writer buffers datasets until they have about
     ``target_fragment_bytes`` (default 128 MiB) in memory, then writes them

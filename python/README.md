@@ -177,10 +177,15 @@ another type than the table:
   example float32 to float64, or int16 to float64.
 - `"same_kind"`: the writer also casts within a kind, for example float64
   to float32. An integer that does not fit raises `LanceNdError`.
+- `"promote"`: as numpy type promotion. When the new values do not fit the
+  table type, the writer widens the variable in the table to the smallest
+  type that holds both, for example int32 and float32 to float64. A writer
+  first commits the datasets that it wrote before such a widening.
 
-The table type always wins, so the first dataset with a variable sets its
-type. To keep all values exact, write the widest type first, or widen the
-values before the write.
+With `"no"`, `"safe"` and `"same_kind"`, the table type always wins, so the
+first dataset with a variable sets its type. `Table.widen("sst",
+pa.float64())` widens a variable of an existing table. It writes that
+variable and the stats column again, not the whole table.
 
 ```python
 with lance_nd.create("data.lance", casting="safe") as writer:

@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use arrow::array::RecordBatch;
-use arrow::datatypes::Schema;
+use arrow::datatypes::{DataType, Schema};
 use arrow::pyarrow::PyArrowType;
 use futures::StreamExt;
 use futures::stream::BoxStream;
@@ -69,7 +69,7 @@ impl Writer {
 impl Writer {
     /// A writer for a new table. `mode` is "create" or "overwrite".
     /// `stats` stores the min and max of each variable per row. `casting`
-    /// is "no", "safe" or "same_kind".
+    /// is "no", "safe", "same_kind" or "promote".
     #[staticmethod]
     #[pyo3(signature = (
         uri,
@@ -301,6 +301,16 @@ impl Table {
         })
     }
 
+    /// Change the value type of `variable` to the wider type `to`.
+    fn widen(
+        &mut self,
+        py: Python<'_>,
+        variable: String,
+        to: PyArrowType<DataType>,
+    ) -> PyResult<()> {
+        block_on(py, lance_nd::widen(&mut self.dataset, &variable, &to.0)).map_err(to_py)
+    }
+
     /// Delete the datasets that match `predicate`, a Lance SQL filter.
     /// Returns the number of deleted datasets.
     fn delete(&mut self, py: Python<'_>, predicate: String) -> PyResult<u64> {
@@ -398,7 +408,12 @@ fn parse_casting(casting: &str) -> PyResult<Casting> {
         "no" => Ok(Casting::No),
         "safe" => Ok(Casting::Safe),
         "same_kind" => Ok(Casting::SameKind),
-        other => Err(invalid("casting", other, "'no', 'safe' or 'same_kind'")),
+        "promote" => Ok(Casting::Promote),
+        other => Err(invalid(
+            "casting",
+            other,
+            "'no', 'safe', 'same_kind' or 'promote'",
+        )),
     }
 }
 

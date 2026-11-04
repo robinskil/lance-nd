@@ -29,7 +29,8 @@ class Writer:
         ``stats`` stores the min and max of each variable per row.
         ``target_fragment_bytes`` and ``write_parallelism`` override the
         fragment size and the number of parallel fragment writes.
-        ``casting`` is "no", "safe" or "same_kind", see ``lance_nd.create``.
+        ``casting`` is "no", "safe", "same_kind" or "promote", see
+        ``lance_nd.create``.
         """
 
     @staticmethod
@@ -99,6 +100,15 @@ class Table:
         datasets that surely do not match, and a kept dataset comes back
         whole. ``batch_size`` and ``batch_size_bytes`` limit the Lance
         batches that the scan reads.
+        """
+
+    def widen(self, variable: str, to: pa.DataType) -> None:
+        """Change the value type of ``variable`` to the wider type ``to``.
+
+        For example ``table.widen("sst", pa.float64())`` for float32 values.
+        ``to`` must hold each old value exactly, as ``casting="safe"``. The
+        stats get the new type too. lance-nd writes the variable and the
+        stats column again, not the whole table.
         """
 
     def delete(self, predicate: str) -> int:

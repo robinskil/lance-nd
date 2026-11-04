@@ -117,12 +117,28 @@ attribute that has another type than the table. The rules follow the
 | `No` (default) | Rejects the write. |
 | `Safe` | Casts the new values when no value can change, for example `Float32` to `Float64` or `UInt16` to `Int32`. |
 | `SameKind` | Also casts within a kind, or to a later kind in the order bool, unsigned, signed, float, for example `Float64` to `Float32`. An integer that does not fit fails the write. |
+| `Promote` | As numpy type promotion. Casts as `Safe` when the new values fit the table type. Otherwise widens the variable in the table to the smallest type that holds both, for example `Int32` and `Float32` to `Float64`, then casts the new values. |
 
-The table type always wins: a cast changes the new rows, never the table.
-So with `Safe`, a `Float64` variable cannot go into a `Float32` table. The
+With `No`, `Safe` and `SameKind`, the table type wins: a cast changes the
+new rows, never the table. So with `Safe`, a `Float64` variable cannot go
+into a `Float32` table. The
 cast comes before the stats, so the stats get the table type too. An
 attribute with a number in one row and an array in another row is never
-cast.
+cast. `Promote` widens only variable values; attributes follow `Safe`.
+
+### Widen a variable
+
+`widen(&mut table, "sst", &DataType::Float64)` changes the value type of a
+variable in the table, and the type of its stats. The new type must hold
+each old value exactly, as `Safe` allows. Lance 11 cannot cast a nested
+field in place, so lance-nd writes the variable and the stats column again
+as new columns, drops the old ones and renames the new ones. The other
+variables stay as they are.
+
+A widen takes three Lance commits. When it stops between them, the next
+`widen` finishes or undoes it first. Under `Promote`, the writers call
+`widen` themselves. An `NdWriter` then first commits the rows that it wrote
+before, because a widen gives the columns new field ids.
 
 ### Rows and chunks
 

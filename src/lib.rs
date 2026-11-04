@@ -27,6 +27,7 @@ pub mod prune;
 pub mod scan;
 pub mod schema;
 pub mod stats;
+pub mod widen;
 pub mod write;
 pub mod writer;
 
@@ -42,5 +43,6 @@ pub use options::{
     set_column_defaults,
 };
 pub use scan::{NdScanner, scan, variables};
+pub use widen::widen;
 pub use write::{WriteOptions, append, write};
 pub use writer::NdWriter;

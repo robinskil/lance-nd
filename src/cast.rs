@@ -13,7 +13,8 @@ use crate::error::Result;
 /// How a write treats a value or attribute type that differs from the table.
 ///
 /// The rules follow the `casting` argument of numpy. The table type wins:
-/// a cast changes the new rows, never the table.
+/// a cast changes the new rows, never the table. Only [`Casting::Promote`]
+/// can widen the table.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum Casting {
     /// Reject the write.
@@ -26,6 +27,11 @@ pub enum Casting {
     /// unsigned, signed, float, such as `float64` to `float32`. An integer
     /// that does not fit fails the write.
     SameKind,
+    /// As numpy type promotion: cast as [`Casting::Safe`] when the new
+    /// values fit the table type. Otherwise widen the variable in the table
+    /// to the smallest type that holds both, see [`crate::widen()`], and
+    /// cast the new values. Attributes follow [`Casting::Safe`].
+    Promote,
 }
 
 /// `batch` with each field cast to the type of the same field in `target`.
@@ -108,13 +114,13 @@ fn cast_field(
 }
 
 /// `true` when `casting` allows a cast of values from `from` to `to`.
-fn allowed(from: &DataType, to: &DataType, casting: Casting) -> bool {
+pub(crate) fn allowed(from: &DataType, to: &DataType, casting: Casting) -> bool {
     let text =
         |t: &DataType| matches!(t, DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View);
     match casting {
         Casting::No => false,
         _ if text(from) && text(to) => true,
-        Casting::Safe => is_safe(from, to),
+        Casting::Safe | Casting::Promote => is_safe(from, to),
         Casting::SameKind => {
             is_safe(from, to)
                 || kind(from)
@@ -122,6 +128,21 @@ fn allowed(from: &DataType, to: &DataType, casting: Casting) -> bool {
                     .is_some_and(|(from, to)| from <= to)
         }
     }
+}
+
+/// The smallest type that holds each value of `a` and of `b`, as numpy
+/// `promote_types`, or `None` when no number type holds both.
+pub(crate) fn promote_type(a: &DataType, b: &DataType) -> Option<DataType> {
+    use DataType::*;
+    if a == b {
+        return Some(a.clone());
+    }
+    let holds = |from: &DataType, to: &DataType| from == to || is_safe(from, to);
+    [
+        UInt8, UInt16, UInt32, UInt64, Int8, Int16, Int32, Int64, Float16, Float32, Float64,
+    ]
+    .into_iter()
+    .find(|to| holds(a, to) && holds(b, to))
 }
 
 /// The numpy kind order: bool, unsigned, signed, float.

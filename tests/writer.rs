@@ -494,6 +494,40 @@ async fn write_batch_takes_encoded_rows() {
     assert_eq!(read[2].column_by_name("sst").unwrap().len(), 4);
 }
 
+/// `batch` with a non-nullable `__global_attrs__` field, as nd-arrow-array writes it.
+fn strict_global_attributes(batch: RecordBatch) -> RecordBatch {
+    let fields: Vec<Field> = batch
+        .schema()
+        .fields()
+        .iter()
+        .map(|f| {
+            let strict = f.name() == "__global_attrs__";
+            f.as_ref().clone().with_nullable(!strict && f.is_nullable())
+        })
+        .collect();
+    RecordBatch::try_new(Arc::new(Schema::new(fields)), batch.columns().to_vec()).unwrap()
+}
+
+#[tokio::test]
+async fn write_batch_takes_strict_global_attributes_that_differ() {
+    let dir = tempfile::tempdir().unwrap();
+    let options = WriteOptions {
+        target_fragment_bytes: 1,
+        ..Default::default()
+    };
+    let other = sst(3, "b").with_attributes(Attributes::new().with("source", "x"));
+    let mut writer = NdWriter::create(&uri(&dir), &options).await.unwrap();
+    for row in [sst(2, "a"), other] {
+        let batch = strict_global_attributes(encode_rows(&[row]).unwrap());
+        writer.write_batch(batch).await.unwrap();
+    }
+    let dataset = writer.finish().await.unwrap();
+    assert_eq!(dataset.get_fragments().len(), 2);
+    let read = read_all(&dataset).await;
+    assert_eq!(read.len(), 2);
+    assert_eq!(read[1].column_by_name("sst").unwrap().len(), 3);
+}
+
 #[tokio::test]
 async fn write_batch_rejects_bad_columns() {
     let dir = tempfile::tempdir().unwrap();

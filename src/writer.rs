@@ -5,7 +5,7 @@ use std::pin::pin;
 use std::sync::Arc;
 
 use arrow::array::{RecordBatch, RecordBatchIterator};
-use arrow::datatypes::{Schema, SchemaRef};
+use arrow::datatypes::{FieldRef, Schema, SchemaRef};
 use futures::{FutureExt, Stream};
 use lance::Dataset;
 use lance::dataset::fragment::write::FragmentCreateBuilder;
@@ -203,6 +203,7 @@ impl NdWriter {
         if batch.num_rows() == 0 {
             return Ok(());
         }
+        let batch = nullable_global_attributes(batch)?;
         self.promote(&batch).await?;
         let table = self.schema.as_ref().map(|(arrow, _)| arrow);
         let batch = prepare_batch(batch, &self.defaults, &self.options, self.stats, table)?;
@@ -472,6 +473,26 @@ impl Drop for NdWriter {
             task.abort();
         }
     }
+}
+
+/// `batch` with a nullable `__global_attrs__` field, as [`crate::encode_rows`]
+/// gives it. Lance fills new attributes of older fragments with nulls, and
+/// a read fails when the field is not nullable.
+fn nullable_global_attributes(batch: RecordBatch) -> Result<RecordBatch> {
+    let schema = batch.schema();
+    let Some((index, field)) = schema.column_with_name(GLOBAL_ATTRIBUTES_FIELD) else {
+        return Ok(batch);
+    };
+    if field.is_nullable() {
+        return Ok(batch);
+    }
+    let mut fields: Vec<FieldRef> = schema.fields().iter().cloned().collect();
+    fields[index] = Arc::new(field.clone().with_nullable(true));
+    let schema = Schema::new_with_metadata(fields, schema.metadata().clone());
+    Ok(RecordBatch::try_new(
+        Arc::new(schema),
+        batch.columns().to_vec(),
+    )?)
 }
 
 /// The bytes in memory and on disk of the written fragments, to estimate

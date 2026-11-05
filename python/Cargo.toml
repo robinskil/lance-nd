@@ -14,7 +14,7 @@ crate-type = ["cdylib"]
 [dependencies]
 arrow = { version = "58", default-features = false, features = ["pyarrow"] }
 futures = "0.3"
-lance-nd = { path = ".." }
+lance-nd = { path = "..", features = ["aws", "azure", "gcp"] }
 tokio = { version = "1", features = ["rt-multi-thread"] }
 lance = { version = "11", default-features = false }
 lance-datafusion = "11"

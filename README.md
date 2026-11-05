@@ -284,6 +284,7 @@ The main functions:
 | Function | Purpose |
 |---|---|
 | `open(uri)` | Open a table. Fails with `InvalidTable` for a table without the lance-nd format key of this release. |
+| `open_with(uri, &storage_options)` | Open a table on an object store, see [Object stores](#object-stores). |
 | `write(uri, rows, &options)` | Create, append to or overwrite a table from a stream of nd record batches, in one commit. |
 | `append(&mut table, rows, &options)` | Append a stream of nd record batches to the latest version of a table, in one commit. |
 | `NdWriter::create` and `NdWriter::append` | Write nd record batches in several calls, then commit all of them in one version with `finish`. `write_batch` takes rows that are already encoded. |
@@ -334,6 +335,38 @@ application, for example [mimalloc](https://crates.io/crates/mimalloc):
 ```rust
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+```
+
+### Object stores
+
+A table can live on S3, Google Cloud Storage or Azure Blob Storage. Turn on
+the cargo feature of the store: `aws`, `gcp` or `azure`. The Python
+package has all three. Give the Lance storage options, for example the
+credentials, in `WriteOptions::storage_options` and in `open_with`:
+
+```rust
+let options: StorageOptions = [("aws_region", "eu-west-1")]
+    .into_iter()
+    .map(|(k, v)| (k.to_string(), v.to_string()))
+    .collect();
+let table = open_with("s3://bucket/arrays.lance", &options).await?;
+```
+
+Without options, Lance reads the credentials from the environment, for
+example `AWS_ACCESS_KEY_ID`. `append` uses the options of its table.
+
+Lance commits on S3 with conditional writes, which AWS S3 supports. Another
+S3 store must reject a put with `If-None-Match: *` when the object exists.
+Otherwise two concurrent commits can overwrite each other.
+
+The tests in `tests/object_store.rs` run against any S3 server, for
+example moto. Set `LANCE_ND_S3_ENDPOINT` and create the bucket
+`lance-nd-test`:
+
+```bash
+moto_server -p 5155 &
+curl -X PUT http://127.0.0.1:5155/lance-nd-test
+LANCE_ND_S3_ENDPOINT=http://127.0.0.1:5155 cargo test --features aws --test object_store
 ```
 
 ### Delete and compact

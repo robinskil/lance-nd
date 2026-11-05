@@ -103,6 +103,7 @@ def create(
     target_fragment_bytes: int | None = None,
     write_parallelism: int | None = None,
     casting: Casting = "no",
+    storage_options: dict[str, str] | None = None,
 ) -> Writer:
     """A writer for a new table. ``mode`` is "create" or "overwrite".
 
@@ -119,6 +120,10 @@ def create(
     holds both, see :meth:`Table.widen`. A writer first commits the
     datasets that it wrote before such a widening.
 
+    ``storage_options`` are the Lance storage options, for example
+    ``aws_region`` or ``aws_endpoint``. An empty value uses the defaults of
+    the environment.
+
     The writer buffers datasets until they have about
     ``target_fragment_bytes`` (default 128 MiB) on disk, as estimated from
     the fragments written so far, then writes them as one Lance fragment. ``write_parallelism`` (default 4) fragments are
@@ -133,6 +138,7 @@ def create(
         target_fragment_bytes,
         write_parallelism,
         casting,
+        storage_options,
     )
     return Writer(native)
 
@@ -143,15 +149,21 @@ def append(
     target_fragment_bytes: int | None = None,
     write_parallelism: int | None = None,
     casting: Casting = "no",
+    storage_options: dict[str, str] | None = None,
 ) -> Writer:
     """A writer that appends to an existing table. See :func:`create` for
-    the fragment options and ``casting``."""
+    the fragment options, ``casting`` and ``storage_options``."""
     native = _lance_nd.Writer.append(
-        uri, column_options, target_fragment_bytes, write_parallelism, casting
+        uri,
+        column_options,
+        target_fragment_bytes,
+        write_parallelism,
+        casting,
+        storage_options,
     )
     return Writer(native)
 
 
-def open(uri: str) -> Table:
-    """Open the table at ``uri``."""
-    return Table.open(uri)
+def open(uri: str, storage_options: dict[str, str] | None = None) -> Table:
+    """Open the table at ``uri``. See :func:`create` for ``storage_options``."""
+    return Table.open(uri, storage_options)

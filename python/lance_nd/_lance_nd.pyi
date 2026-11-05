@@ -38,6 +38,7 @@ class Writer:
         target_fragment_bytes: int | None = None,
         write_parallelism: int | None = None,
         casting: Casting = "no",
+        storage_options: dict[str, str] | None = None,
     ) -> Writer:
         """A writer for a new table. ``mode`` is "create" or "overwrite".
 
@@ -55,6 +56,7 @@ class Writer:
         target_fragment_bytes: int | None = None,
         write_parallelism: int | None = None,
         casting: Casting = "no",
+        storage_options: dict[str, str] | None = None,
     ) -> Writer:
         """A writer that appends to an existing table."""
 
@@ -71,7 +73,7 @@ class Table:
     """A lance-nd table at one version."""
 
     @staticmethod
-    def open(uri: str) -> Table:
+    def open(uri: str, storage_options: dict[str, str] | None = None) -> Table:
         """Open the table at ``uri``."""
 
     @property

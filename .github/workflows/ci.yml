@@ -29,7 +29,7 @@ jobs:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all --check
-      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
   rust:
     strategy:
@@ -47,8 +47,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --workspace
 
-  python:
+  s3:
     runs-on: ubuntu-24.04
+    env:
+      LANCE_ND_S3_ENDPOINT: http://127.0.0.1:5155
     steps:
       - uses: actions/checkout@v4
       - uses: arduino/setup-protoc@v3
@@ -60,6 +62,33 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - name: Start an S3 server
+        run: |
+          python -m pip install "moto[server]"
+          nohup moto_server -H 127.0.0.1 -p 5155 > moto.log 2>&1 &
+          curl -s --retry 20 --retry-connrefused --retry-delay 1 -X PUT http://127.0.0.1:5155/lance-nd-test
+      - run: cargo test --features aws --test object_store
+
+  python:
+    runs-on: ubuntu-24.04
+    env:
+      LANCE_ND_S3_ENDPOINT: http://127.0.0.1:5155
+    steps:
+      - uses: actions/checkout@v4
+      - uses: arduino/setup-protoc@v3
+        with:
+          version: ${{ env.PROTOC_VERSION }}
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Start an S3 server
+        run: |
+          python -m pip install "moto[server]"
+          nohup moto_server -H 127.0.0.1 -p 5155 > moto.log 2>&1 &
+          curl -s --retry 20 --retry-connrefused --retry-delay 1 -X PUT http://127.0.0.1:5155/lance-nd-test
       - name: Build and install the package
         working-directory: python
         run: |

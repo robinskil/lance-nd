@@ -17,6 +17,7 @@ use crate::format::add_format;
 use crate::options::{ColumnOptions, column_defaults, with_column_options};
 use crate::schema::conform_batch;
 use crate::stats::{add_stats, has_stats};
+use crate::store::StorageOptions;
 use crate::writer::{NdWriter, open_existing};
 
 /// Lance file version for new tables. Version 2.2 can add nested fields,
@@ -56,6 +57,10 @@ pub struct WriteOptions {
     pub target_fragment_bytes: usize,
     /// The most fragments that [`crate::NdWriter`] writes at the same time.
     pub write_parallelism: usize,
+    /// Lance storage options, for example the credentials of an object
+    /// store, see [`crate::store`]. [`append()`] uses the options of its
+    /// table when this is empty.
+    pub storage_options: StorageOptions,
 }
 
 impl Default for WriteOptions {
@@ -70,6 +75,7 @@ impl Default for WriteOptions {
             casting: Casting::No,
             target_fragment_bytes: 128 << 20,
             write_parallelism: 4,
+            storage_options: StorageOptions::new(),
         }
     }
 }
@@ -86,7 +92,11 @@ pub async fn write(
     options: &WriteOptions,
 ) -> Result<Dataset> {
     let writer = match options.mode {
-        WriteMode::Append if open_existing(uri).await?.is_some() => {
+        WriteMode::Append
+            if open_existing(uri, &options.storage_options)
+                .await?
+                .is_some() =>
+        {
             NdWriter::append(uri, options).await?
         }
         WriteMode::Append => {
@@ -111,7 +121,14 @@ pub async fn append(
     rows: impl Stream<Item = Result<NdRecordBatch>>,
     options: &WriteOptions,
 ) -> Result<()> {
-    let writer = NdWriter::append(dataset.uri(), options).await?;
+    let mut options = options.clone();
+    if options.storage_options.is_empty() {
+        options.storage_options = dataset
+            .initial_storage_options()
+            .cloned()
+            .unwrap_or_default();
+    }
+    let writer = NdWriter::append(dataset.uri(), &options).await?;
     *dataset = write_all(writer, rows).await?;
     Ok(())
 }

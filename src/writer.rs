@@ -23,6 +23,7 @@ use crate::format::check_format;
 use crate::options::ColumnOptions;
 use crate::schema::{concat_conformed, holds_schema, merge_schemas, missing_fields, used_fields};
 use crate::stats::{STATS_PREFIX, is_stats_name};
+use crate::store::{StorageOptions, open_dataset, store_params};
 use crate::widen::{promotions, widen};
 use crate::write::{
     FILE_VERSION, WriteOptions, next_group, prepare_batch, table_defaults, table_has_stats,
@@ -79,7 +80,7 @@ impl NdWriter {
     /// exists, or [`WriteMode::Overwrite`], which replaces the table at
     /// [`NdWriter::finish`].
     pub async fn create(uri: &str, options: &WriteOptions) -> Result<Self> {
-        let existing = open_existing(uri).await?;
+        let existing = open_existing(uri, &options.storage_options).await?;
         let overwrite = match options.mode {
             WriteMode::Create if existing.is_some() => {
                 return Err(Error::TableExists(uri.to_string()));
@@ -112,7 +113,7 @@ impl NdWriter {
     /// A writer that appends to the table at `uri`. Fails when the table
     /// does not exist. `options.mode` is ignored.
     pub async fn append(uri: &str, options: &WriteOptions) -> Result<Self> {
-        let dataset = open_existing(uri)
+        let dataset = open_existing(uri, &options.storage_options)
             .await?
             .ok_or_else(|| Error::TableNotFound(uri.to_string()))?;
         check_format(&dataset)?;
@@ -298,10 +299,12 @@ impl NdWriter {
         let projected =
             lance.project_by_schema(present.as_ref(), OnMissing::Error, OnTypeMismatch::Error)?;
         let uri = self.uri.clone();
+        let store_params = store_params(&self.options.storage_options);
         let task = tokio::spawn(async move {
             let params = WriteParams {
                 mode: WriteMode::Append,
                 data_storage_version: Some(FILE_VERSION),
+                store_params,
                 ..Default::default()
             };
             let reader = RecordBatchIterator::new([Ok(batch)], present);
@@ -397,12 +400,17 @@ impl NdWriter {
         let dataset = match (self.base.take(), self.overwrite) {
             (None, overwrite) => {
                 // Another writer can create the table after `create`.
-                if !overwrite && open_existing(&self.uri).await?.is_some() {
+                let storage_options = &self.options.storage_options;
+                if !overwrite && open_existing(&self.uri, storage_options).await?.is_some() {
                     return Err(Error::TableExists(self.uri.clone()));
                 }
                 let operation = overwrite_operation(numbered(fragments, 0), schema);
-                CommitBuilder::new(self.uri.as_str())
-                    .with_storage_format(FILE_VERSION)
+                let mut builder =
+                    CommitBuilder::new(self.uri.as_str()).with_storage_format(FILE_VERSION);
+                if let Some(params) = store_params(storage_options) {
+                    builder = builder.with_store_params(params);
+                }
+                builder
                     .execute(Transaction::new(0, operation, None))
                     .await?
             }
@@ -576,8 +584,8 @@ fn overwrite_operation(fragments: Vec<Fragment>, schema: LanceSchema) -> Operati
 }
 
 /// The table at `uri`, or `None` when it does not exist.
-pub(crate) async fn open_existing(uri: &str) -> Result<Option<Dataset>> {
-    match Dataset::open(uri).await {
+pub(crate) async fn open_existing(uri: &str, options: &StorageOptions) -> Result<Option<Dataset>> {
+    match open_dataset(uri, options).await {
         Ok(dataset) => Ok(Some(dataset)),
         Err(lance::Error::DatasetNotFound { .. }) => Ok(None),
         Err(error) => Err(error.into()),

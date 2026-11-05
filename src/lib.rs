@@ -6,6 +6,7 @@
 //! a complete one or a chunk of a larger one.
 //!
 //! - [`open()`]: open a table and check its format version.
+//! - [`store`]: storage options for S3, Google Cloud Storage and Azure.
 //! - [`write()`] and [`append()`]: write a stream of nd record batches.
 //! - [`NdWriter`]: write in several calls and commit once.
 //! - [`scan()`]: read a stream of nd record batches, with a projection.
@@ -29,13 +30,14 @@ pub mod prune;
 pub mod scan;
 pub mod schema;
 pub mod stats;
+pub mod store;
 pub mod widen;
 pub mod write;
 pub mod writer;
 
 pub use cast::Casting;
 pub use error::{Error, Result};
-pub use format::{FORMAT_VERSION, check_format, open};
+pub use format::{FORMAT_VERSION, check_format, open, open_with};
 pub use lance::dataset::WriteMode;
 pub use lance::dataset::cleanup::RemovalStats;
 pub use lance::dataset::optimize::CompactionMetrics;
@@ -46,6 +48,7 @@ pub use options::{
     set_column_defaults,
 };
 pub use scan::{NdScanner, scan, variables};
+pub use store::StorageOptions;
 pub use widen::widen;
 pub use write::{WriteOptions, append, write};
 pub use writer::NdWriter;

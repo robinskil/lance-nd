@@ -9,6 +9,7 @@ use std::collections::HashMap;
 use lance::Dataset;
 
 use crate::error::{Error, Result};
+use crate::store::{StorageOptions, open_dataset};
 
 /// The table schema metadata key of the format version.
 pub const FORMAT_METADATA_KEY: &str = "lance_nd:format";
@@ -19,7 +20,13 @@ pub const FORMAT_VERSION: &str = "1";
 /// Open the lance-nd table at `uri`. Fails when no table is there, or when
 /// the table has another format version.
 pub async fn open(uri: &str) -> Result<Dataset> {
-    let dataset = Dataset::open(uri).await?;
+    open_with(uri, &StorageOptions::new()).await
+}
+
+/// Open the lance-nd table at `uri` with Lance storage options, for example
+/// the credentials of an object store. See [`crate::store`].
+pub async fn open_with(uri: &str, options: &StorageOptions) -> Result<Dataset> {
+    let dataset = open_dataset(uri, options).await?;
     check_format(&dataset)?;
     Ok(dataset)
 }

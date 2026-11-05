@@ -98,6 +98,7 @@ impl Writer {
         target_fragment_bytes = None,
         write_parallelism = None,
         casting = "no",
+        storage_options = None,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn create(
@@ -110,6 +111,7 @@ impl Writer {
         target_fragment_bytes: Option<usize>,
         write_parallelism: Option<usize>,
         casting: &str,
+        storage_options: Option<HashMap<String, String>>,
     ) -> PyResult<Self> {
         let mode = match mode {
             "create" => WriteMode::Create,
@@ -127,6 +129,7 @@ impl Writer {
                 column_options: parse_column_options(column_options)?,
                 stats,
                 casting: parse_casting(casting)?,
+                storage_options: storage_options.unwrap_or_default(),
                 ..Default::default()
             },
             target_fragment_bytes,
@@ -147,6 +150,7 @@ impl Writer {
         target_fragment_bytes = None,
         write_parallelism = None,
         casting = "no",
+        storage_options = None,
     ))]
     fn append(
         py: Python<'_>,
@@ -155,11 +159,13 @@ impl Writer {
         target_fragment_bytes: Option<usize>,
         write_parallelism: Option<usize>,
         casting: &str,
+        storage_options: Option<HashMap<String, String>>,
     ) -> PyResult<Self> {
         let options = fragment_options(
             WriteOptions {
                 column_options: parse_column_options(column_options)?,
                 casting: parse_casting(casting)?,
+                storage_options: storage_options.unwrap_or_default(),
                 ..Default::default()
             },
             target_fragment_bytes,
@@ -207,10 +213,17 @@ struct Table {
 
 #[pymethods]
 impl Table {
-    /// Open the table at `uri`.
+    /// Open the table at `uri`. `storage_options` are the Lance storage
+    /// options, for example the credentials of an object store.
     #[staticmethod]
-    fn open(py: Python<'_>, uri: String) -> PyResult<Self> {
-        let dataset = block_on(py, lance_nd::open(&uri)).map_err(to_py)?;
+    #[pyo3(signature = (uri, storage_options = None))]
+    fn open(
+        py: Python<'_>,
+        uri: String,
+        storage_options: Option<HashMap<String, String>>,
+    ) -> PyResult<Self> {
+        let options = storage_options.unwrap_or_default();
+        let dataset = block_on(py, lance_nd::open_with(&uri, &options)).map_err(to_py)?;
         Ok(Self { dataset, uri })
     }
 

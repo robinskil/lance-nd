@@ -339,6 +339,7 @@ impl PartWriter<'_> {
         let params = WriteParams {
             mode: WriteMode::Append,
             data_storage_version: Some(FILE_VERSION),
+            store_params: self.dataset.store_params().cloned(),
             ..Default::default()
         };
         let concat = |part: &[RecordBatch]| concat_batches(&self.arrow_schema, part);

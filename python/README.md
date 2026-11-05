@@ -317,8 +317,25 @@ as `[]`, holds no value, so the encoder leaves it out. One `write()` call holds 
 2,147,483,647 values per variable over all its datasets. For more, write
 fewer datasets per call.
 
+### Object stores
+
+`create`, `append` and `open` take `storage_options`, the Lance storage
+options of S3, Google Cloud Storage or Azure:
+
+```python
+options = {"aws_region": "eu-west-1"}
+with lance_nd.create("s3://bucket/data.lance", storage_options=options) as writer:
+    writer.write(ds)
+table = lance_nd.open("s3://bucket/data.lance", storage_options=options)
+```
+
+Without options, Lance reads the credentials from the environment.
+
 ## Tests
 
 ```bash
 .venv/Scripts/python -m pytest tests
 ```
+
+`tests/test_s3.py` runs when `LANCE_ND_S3_ENDPOINT` points to an S3 server
+with the bucket `lance-nd-test`, see the main README.

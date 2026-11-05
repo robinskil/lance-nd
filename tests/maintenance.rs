@@ -45,7 +45,7 @@ async fn table(dir: &tempfile::TempDir, rows: i64, stats: bool) -> Dataset {
     let uri = dir.path().join("table.lance").to_str().unwrap().to_string();
     let options = WriteOptions {
         stats,
-        max_rows_per_commit: 1,
+        max_rows_per_group: 1,
         target_fragment_bytes: 1,
         ..Default::default()
     };
@@ -163,7 +163,9 @@ async fn compact_merges_fragments_and_drops_deleted_rows() {
 async fn compact_splits_a_large_fragment_by_size() {
     let dir = tempfile::tempdir().unwrap();
     let uri = dir.path().join("table.lance").to_str().unwrap().to_string();
-    let mut writer = NdWriter::create(&uri, &WriteOptions::default()).await.unwrap();
+    let mut writer = NdWriter::create(&uri, &WriteOptions::default())
+        .await
+        .unwrap();
     writer
         .write(stream::iter((0..12).map(|id| Ok(row(id)))))
         .await

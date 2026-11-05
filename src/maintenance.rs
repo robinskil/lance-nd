@@ -171,7 +171,11 @@ async fn piece_of(dataset: &Dataset, fragment: &Fragment) -> Result<Piece> {
             Some(size) => size.get(),
             None => {
                 let path = dataset.data_dir().join(file.path.as_str());
-                dataset.object_store(file.base_id).await?.size(&path).await?
+                dataset
+                    .object_store(file.base_id)
+                    .await?
+                    .size(&path)
+                    .await?
             }
         };
     }
@@ -401,7 +405,11 @@ mod tests {
     }
 
     fn ids(batch: &RecordBatch) -> Vec<i64> {
-        batch.column(0).as_primitive::<Int64Type>().values().to_vec()
+        batch
+            .column(0)
+            .as_primitive::<Int64Type>()
+            .values()
+            .to_vec()
     }
 
     fn piece(bytes: u64, rows: u64, deleted: u64) -> Piece {

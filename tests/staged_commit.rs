@@ -99,15 +99,14 @@ impl Staged {
 
     async fn commit(self) -> Dataset {
         let schema = self.schema.unwrap();
-        let mut next_id = self
+        let first_id = self
             .base
             .as_ref()
             .and_then(|d| d.manifest.max_fragment_id())
             .map_or(0, |id| id + 1);
         let mut fragments = self.fragments;
-        for fragment in &mut fragments {
-            fragment.id = next_id;
-            next_id += 1;
+        for (id, fragment) in (first_id..).zip(&mut fragments) {
+            fragment.id = id;
         }
         match self.base {
             None => {

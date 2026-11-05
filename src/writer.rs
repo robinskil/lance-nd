@@ -419,16 +419,9 @@ impl NdWriter {
                     .execute(Transaction::new(version, operation, None))
                     .await?
             }
-            // No new fields: a plain append, which Lance merges with concurrent appends.
+            // No new fields: new rows only, which Lance merges with concurrent appends.
             (Some(base), false) if schema.max_field_id() == base.schema().max_field_id() => {
-                let version = base.version().version;
-                CommitBuilder::new(Arc::new(base))
-                    .execute(Transaction::new(
-                        version,
-                        Operation::Append { fragments },
-                        None,
-                    ))
-                    .await?
+                commit_rows(base, fragments, &schema).await?
             }
             (Some(base), false) => {
                 let version = base.version().version;
@@ -503,6 +496,69 @@ impl DiskRatio {
     }
 }
 
+/// The most tries of a row commit that a concurrent commit preempts.
+const MAX_COMMIT_ATTEMPTS: usize = 10;
+
+/// Commit `fragments` as new rows of `base`, with the fields of `staged`.
+///
+/// The commit is an `Update` with new fragments only. Lance merges it with
+/// concurrent appends, deletes and compactions. A concurrent schema change,
+/// for example a widen, makes Lance reject it. Then the writer checks that
+/// the table still has each field of the fragments, and tries again.
+async fn commit_rows(
+    mut base: Dataset,
+    fragments: Vec<Fragment>,
+    staged: &LanceSchema,
+) -> Result<Dataset> {
+    for attempt in 1..=MAX_COMMIT_ATTEMPTS {
+        check_fields(&base, &fragments, staged)?;
+        let operation = Operation::Update {
+            removed_fragment_ids: Vec::new(),
+            updated_fragments: Vec::new(),
+            new_fragments: fragments.clone(),
+            fields_modified: Vec::new(),
+            compacted_sstables: Vec::new(),
+            fields_for_preserving_frag_bitmap: Vec::new(),
+            update_mode: None,
+            inserted_rows_filter: None,
+            updated_fragment_offsets: None,
+        };
+        let version = base.version().version;
+        match CommitBuilder::new(Arc::new(base.clone()))
+            .execute(Transaction::new(version, operation, None))
+            .await
+        {
+            Ok(dataset) => return Ok(dataset),
+            Err(lance::Error::RetryableCommitConflict { .. }) if attempt < MAX_COMMIT_ATTEMPTS => {
+                base.checkout_latest().await?;
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+    unreachable!("the last attempt returns")
+}
+
+/// Fails when `table` lacks a field that the data files of `fragments` hold.
+/// A widen gives a variable new field ids, so rows with the old ids would
+/// read as absent.
+fn check_fields(table: &Dataset, fragments: &[Fragment], staged: &LanceSchema) -> Result<()> {
+    let ids: HashSet<i32> = table.schema().field_ids().into_iter().collect();
+    let lost = fragments
+        .iter()
+        .flat_map(|fragment| fragment.files.iter())
+        .flat_map(|file| file.fields.iter())
+        .find(|id| **id >= 0 && !ids.contains(*id));
+    match lost {
+        Some(id) => Err(Error::SchemaMismatch(format!(
+            "the table changed or dropped '{}' during the write, nothing is committed",
+            staged
+                .field_path(*id)
+                .unwrap_or_else(|_| format!("field {id}"))
+        ))),
+        None => Ok(()),
+    }
+}
+
 /// Give the fragments ids from `first_id` on. Lance assigns ids only for appends.
 fn numbered(mut fragments: Vec<Fragment>, first_id: u64) -> Vec<Fragment> {
     for (id, fragment) in (first_id..).zip(&mut fragments) {
@@ -521,7 +577,7 @@ fn overwrite_operation(fragments: Vec<Fragment>, schema: LanceSchema) -> Operati
 }
 
 /// The table at `uri`, or `None` when it does not exist.
-async fn open_existing(uri: &str) -> Result<Option<Dataset>> {
+pub(crate) async fn open_existing(uri: &str) -> Result<Option<Dataset>> {
     match Dataset::open(uri).await {
         Ok(dataset) => Ok(Some(dataset)),
         Err(lance::Error::DatasetNotFound { .. }) => Ok(None),

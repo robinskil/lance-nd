@@ -132,13 +132,14 @@ cast. `Promote` widens only variable values; attributes follow `Safe`.
 variable in the table, and the type of its stats. The new type must hold
 each old value exactly, as `Safe` allows. Lance 11 cannot cast a nested
 field in place, so lance-nd writes the variable and its stats column again
-as new columns, drops the old ones and renames the new ones. The other
-variables stay as they are.
+under new field ids, in one Lance commit. The other variables stay as they
+are.
 
-A widen takes three Lance commits. When it stops between them, the next
-`widen` finishes or undoes it first. Under `Promote`, the writers call
-`widen` themselves. An `NdWriter` then first commits the rows that it wrote
-before, because a widen gives the columns new field ids.
+A writer that started before a widen and commits after it holds rows with
+the old field ids. Its commit fails with `Error::SchemaMismatch` and adds no
+rows. Write the rows again. A widen that a concurrent write preempts starts
+again, up to 10 times. Under `Promote`, the writers call `widen`
+themselves. An `NdWriter` then first commits the rows that it wrote before.
 
 ### Rows and chunks
 
@@ -283,20 +284,14 @@ The main functions:
 
 | Function | Purpose |
 |---|---|
-| `write(uri, rows, &options)` | Create, append to or overwrite a table from a stream of nd record batches. |
-| `append(&mut table, rows, &options)` | Append a stream of nd record batches to an open table. |
+| `write(uri, rows, &options)` | Create, append to or overwrite a table from a stream of nd record batches, in one commit. |
+| `append(&mut table, rows, &options)` | Append a stream of nd record batches to the latest version of a table, in one commit. |
 | `NdWriter::create` and `NdWriter::append` | Write nd record batches in several calls, then commit all of them in one version with `finish`. `write_batch` takes rows that are already encoded. |
 | `scan(&table)` | Read nd record batches as a stream, with `project`, `filter`, `filter_expr`, `lance_filter` and `limit`. |
 | `variables(&table)` | List the array columns of the table. |
 | `column_defaults` and `set_column_defaults` | Read and change the encoding defaults for new columns. |
 | `delete` and `delete_expr` | Delete the rows that match an exact predicate. |
 | `compact` and `cleanup_old_versions` | Merge small fragments, split large fragments, remove deleted rows and free disk space. |
-
-`project` takes whole variables, such as `temperature`, not nested fields
-such as `temperature.attrs.units`. Each row keeps all of its global
-attributes. An empty projection reads only the global attributes, one row
-without arrays for each table row. A filter can use nested fields, see
-[Filters](#filters).
 
 `project` takes whole variables, such as `temperature`, not nested fields
 such as `temperature.attrs.units`. Each row keeps all of its global
@@ -314,7 +309,8 @@ write makes the writer fail, and `finish` then commits nothing.
 
 An append `NdWriter` adds new variables and attribute keys to the table
 before it writes the first fragment with them, so readers can see new empty
-columns before `finish`. `finish` then commits a plain append.
+columns before `finish`. `finish` then commits the new rows only. Lance
+merges this commit with concurrent appends, deletes and compactions.
 
 `NdWriter` buffers rows and writes them as Lance fragments of about 128 MiB
 on disk, with up to 4 fragment writes at the same time. Lance compresses the

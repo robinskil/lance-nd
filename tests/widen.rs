@@ -6,7 +6,6 @@ use arrow::array::{ArrayRef, AsArray, Float32Array, Float64Array, Int32Array};
 use arrow::datatypes::{DataType, Field, Float64Type, Schema};
 use futures::stream;
 use lance::Dataset;
-use lance::dataset::NewColumnTransform;
 use lance_nd::datafusion::functions::core::expr_fn::get_field;
 use lance_nd::datafusion::logical_expr::{col, lit};
 use lance_nd::{Error, NdWriter, WriteOptions, scan, widen};
@@ -146,25 +145,55 @@ async fn widen_rejects_other_casts_and_names() {
     assert_eq!(dataset.version().version, version);
 }
 
+/// The writer opened the table before the widen and commits after it.
 #[tokio::test]
-async fn widen_cleans_up_an_interrupted_widen() {
-    // A widen that stopped after the first commit leaves a temporary column.
+async fn writer_from_before_a_widen_loses_no_values() {
     let dir = tempfile::tempdir().unwrap();
     let mut dataset = table(&dir, true).await;
-    let leftover = Arc::new(Schema::new(vec![Field::new(
-        "__widen__v",
-        DataType::Int32,
-        true,
-    )]));
-    dataset
-        .add_columns(NewColumnTransform::AllNulls(leftover), None, None)
+    let mut writer = NdWriter::append(dataset.uri(), &WriteOptions::default())
+        .await
+        .unwrap();
+    let rows = vec![row("v", Arc::new(Float32Array::from(vec![9.5f32])))];
+    writer
+        .write(stream::iter(rows.into_iter().map(Ok)))
         .await
         .unwrap();
     widen(&mut dataset, "v", &DataType::Float64).await.unwrap();
-    let schema = Schema::from(dataset.schema());
-    assert!(schema.field_with_name("__widen__v").is_err());
-    assert_eq!(value_type(&dataset, "v"), DataType::Float64);
-    assert_eq!(v_values(&dataset).await[0], Some(vec![1.5, 2.5]));
+    let result = writer.finish().await;
+    let dataset = Dataset::open(dataset.uri()).await.unwrap();
+    let values = v_values(&dataset).await;
+    // The rows hold the old field ids of `v`, so the commit fails and adds no rows.
+    assert!(
+        matches!(&result, Err(Error::SchemaMismatch(message)) if message.contains("'v")),
+        "{:?}",
+        result.map(|_| ())
+    );
+    assert_eq!(values.len(), 3);
+    assert_eq!(values[0], Some(vec![1.5, 2.5]));
+}
+
+/// An append from a table handle older than the widen.
+#[tokio::test]
+async fn append_from_before_a_widen_loses_no_values() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut dataset = table(&dir, true).await;
+    let mut stale = dataset.clone();
+    widen(&mut dataset, "v", &DataType::Float64).await.unwrap();
+    let rows = vec![row("v", Arc::new(Float32Array::from(vec![9.5f32])))];
+    let result = lance_nd::append(
+        &mut stale,
+        stream::iter(rows.into_iter().map(Ok)),
+        &WriteOptions::default(),
+    )
+    .await;
+    let dataset = Dataset::open(dataset.uri()).await.unwrap();
+    let values = v_values(&dataset).await;
+    // The append starts from the widened table, which rejects Float32 values.
+    assert!(
+        matches!(result, Err(Error::SchemaMismatch(_))),
+        "{result:?}"
+    );
+    assert_eq!(values.len(), 3);
 }
 
 mod promote {

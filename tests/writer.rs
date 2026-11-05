@@ -649,7 +649,7 @@ async fn many_varying_variables_round_trip() {
 }
 
 #[tokio::test]
-async fn append_with_new_fields_commits_an_append() {
+async fn append_with_new_fields_commits_new_rows_only() {
     use lance::dataset::transaction::Operation;
     let dir = tempfile::tempdir().unwrap();
     let options = WriteOptions {
@@ -669,8 +669,15 @@ async fn append_with_new_fields_commits_an_append() {
     }
     let dataset = writer.finish().await.unwrap();
     let transaction = dataset.read_transaction().await.unwrap().unwrap();
+    // An Update with new fragments only, which conflicts with a widen.
     assert!(
-        matches!(transaction.operation, Operation::Append { .. }),
+        matches!(
+            &transaction.operation,
+            Operation::Update { updated_fragments, removed_fragment_ids, new_fragments, .. }
+                if updated_fragments.is_empty()
+                    && removed_fragment_ids.is_empty()
+                    && !new_fragments.is_empty()
+        ),
         "{:?}",
         transaction.operation
     );

@@ -2879,6 +2879,7 @@ dependencies = [
  "lance-core",
  "lance-file",
  "nd-arrow-array",
+ "serde_json",
  "tempfile",
  "thiserror",
  "tokio",

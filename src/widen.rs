@@ -1,18 +1,20 @@
 //! Widen the value type of a variable in the table.
 //!
 //! Lance 11 cannot cast a struct column or a nested field in place, so
-//! [`widen`] writes the variable again as a new column, drops the old
-//! column and renames the new one. The stats column gets the same
-//! treatment. Only these columns are written again, not the whole table.
+//! [`widen`] writes the variable again under new field ids and commits it in
+//! place of the old column. The stats column gets the same treatment. Only
+//! these columns are written again, not the whole table.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use arrow::array::RecordBatch;
 use arrow::compute::cast;
-use arrow::datatypes::{DataType, Field, Fields, Schema};
+use arrow::datatypes::{DataType, Field, Fields, Schema, SchemaRef};
 use lance::Dataset;
-use lance::dataset::{BatchUDF, ColumnAlteration, NewColumnTransform};
-use lance_core::datatypes::format_field_path;
+use lance::dataset::transaction::{Operation, Transaction};
+use lance::dataset::{BatchUDF, CommitBuilder, NewColumnTransform};
+use lance_core::datatypes::{Field as LanceField, format_field_path};
 use nd_arrow_array::extension::{VALUES_FIELD, is_nd_field};
 
 use crate::cast::{Casting, allowed, promote_type};
@@ -20,17 +22,17 @@ use crate::error::{Error, Result};
 use crate::schema::fill_hidden_nulls;
 use crate::stats::stats_column;
 
-/// The name prefix of the temporary columns of [`widen`].
+/// The name prefix of the new columns until the commit gives them the old names.
 const TEMPORARY_PREFIX: &str = "__widen__";
 
 /// Change the value type of `variable` to `to`, for example `Float32` to
 /// `Float64`. The stats of the variable get the new type too.
 ///
 /// `to` must hold each old value exactly, as [`Casting::Safe`] allows. The
-/// same type does nothing. A widen takes three Lance commits. When it stops
-/// between them, the next call to `widen` finishes or undoes it first.
+/// same type does nothing. A widen is one Lance commit. It writes the
+/// variable again, so a concurrent commit that adds rows makes it start
+/// again, up to a limit.
 pub async fn widen(dataset: &mut Dataset, variable: &str, to: &DataType) -> Result<()> {
-    finish_interrupted(dataset).await?;
     let schema = Schema::from(dataset.schema());
     let field = schema
         .field_with_name(variable)
@@ -75,22 +77,6 @@ pub(crate) fn promotions(batch: &RecordBatch, table: &Schema) -> Vec<(String, Da
         .collect()
 }
 
-/// Widen the variables of `batch` in the table as [`Casting::Promote`]
-/// needs. Without that rule, nothing changes.
-pub(crate) async fn promote_table(
-    dataset: &mut Dataset,
-    batch: &RecordBatch,
-    casting: Casting,
-) -> Result<()> {
-    if casting != Casting::Promote {
-        return Ok(());
-    }
-    for (variable, to) in promotions(batch, &Schema::from(dataset.schema())) {
-        widen(dataset, &variable, &to).await?;
-    }
-    Ok(())
-}
-
 /// The value type of an nd column.
 fn value_type(field: &Field) -> Result<DataType> {
     if let DataType::Struct(children) = field.data_type()
@@ -127,9 +113,31 @@ fn with_value_type(field: &Field, to: &DataType) -> Field {
     })
 }
 
-/// The stats column with the bounds of `variable` of type `to`.
-/// Write each old column of `columns` again with the type of its new field.
+/// The most tries of a widen that a concurrent commit preempts.
+const MAX_ATTEMPTS: usize = 10;
+
+/// Write each old column of `columns` again with the type of its new field,
+/// in one Lance commit.
+///
+/// Each fragment gets a new data file with the new columns, under new field
+/// ids and the old names. A concurrent append or writer commit conflicts with
+/// this commit, so no row keeps a field id that the widen removes.
 async fn rewrite(dataset: &mut Dataset, columns: &[(Field, Field)]) -> Result<()> {
+    for attempt in 1..=MAX_ATTEMPTS {
+        match rewrite_once(dataset, columns).await {
+            Err(Error::Lance(error))
+                if matches!(*error, lance::Error::RetryableCommitConflict { .. })
+                    && attempt < MAX_ATTEMPTS =>
+            {
+                dataset.checkout_latest().await?;
+            }
+            result => return result,
+        }
+    }
+    unreachable!("the last attempt returns")
+}
+
+async fn rewrite_once(dataset: &mut Dataset, columns: &[(Field, Field)]) -> Result<()> {
     let temporary: Vec<Field> = columns
         .iter()
         .map(|(_, new)| {
@@ -139,14 +147,89 @@ async fn rewrite(dataset: &mut Dataset, columns: &[(Field, Field)]) -> Result<()
         .collect();
     let output = Arc::new(Schema::new(temporary));
     let old: Vec<String> = columns.iter().map(|(old, _)| old.name().clone()).collect();
+    let paths: Vec<String> = old.iter().map(|name| format_field_path(&[name])).collect();
+    let read_version = dataset.version().version;
+
+    let mut fragments = Vec::new();
+    let mut schema = None;
+    for fragment in dataset.get_fragments() {
+        let udf = NewColumnTransform::BatchUDF(cast_udf(output.clone(), old.clone()));
+        let (fragment, fragment_schema) =
+            fragment.add_columns(udf, Some(paths.clone()), None).await?;
+        fragments.push(fragment);
+        schema = Some(fragment_schema);
+    }
+    // Without fragments, only the schema changes. Lance gives new fields the
+    // ids after the highest id, as add_columns does.
+    let mut schema = match schema {
+        Some(schema) => schema,
+        None => {
+            let mut schema = dataset.schema().merge(output.as_ref())?;
+            schema.set_field_id(Some(dataset.manifest.max_field_id()));
+            schema
+        }
+    };
+    // Each old leaf takes the id and the type of its new leaf. A data file
+    // lists leaf ids only, so the structs and lists keep their ids. Rows with
+    // the old leaf ids no longer read, also from a concurrent writer.
+    for name in &old {
+        let temporary = schema
+            .field(&format!("{TEMPORARY_PREFIX}{name}"))
+            .cloned()
+            .ok_or_else(|| Error::InvalidTable(format!("no new column for '{name}'")))?;
+        let field = schema
+            .fields
+            .iter_mut()
+            .find(|field| field.name == *name)
+            .ok_or_else(|| Error::InvalidTable(format!("no column '{name}'")))?;
+        take_leaves(field, &temporary);
+    }
+    schema
+        .fields
+        .retain(|field| !field.name.starts_with(TEMPORARY_PREFIX));
+    // A data file with only old fields holds nothing that the table reads.
+    let ids: HashSet<i32> = schema.field_ids().into_iter().collect();
+    for fragment in &mut fragments {
+        fragment
+            .files
+            .retain(|file| file.fields.iter().any(|id| ids.contains(id)));
+    }
+    let operation = Operation::Merge {
+        fragments,
+        schema,
+        preserves_nullability: true,
+    };
+    *dataset = CommitBuilder::new(Arc::new(dataset.clone()))
+        .execute(Transaction::new(read_version, operation, None))
+        .await?;
+    Ok(())
+}
+
+/// Give each leaf of `field` the leaf at the same path in `new`.
+fn take_leaves(field: &mut LanceField, new: &LanceField) {
+    if !field.data_type().is_nested() {
+        let parent_id = field.parent_id;
+        *field = new.clone();
+        field.parent_id = parent_id;
+        return;
+    }
+    for child in &mut field.children {
+        if let Some(new_child) = new.children.iter().find(|c| c.name == child.name) {
+            take_leaves(child, new_child);
+        }
+    }
+}
+
+/// A transform that reads the columns `old` and casts them to the fields of
+/// `output`.
+fn cast_udf(output: SchemaRef, old: Vec<String>) -> BatchUDF {
     let mapper_output = output.clone();
-    let mapper_old = old.clone();
-    let udf = BatchUDF {
+    BatchUDF {
         mapper: Box::new(move |batch| {
             let arrays = mapper_output
                 .fields()
                 .iter()
-                .zip(&mapper_old)
+                .zip(&old)
                 .map(|(field, name)| {
                     let column = batch.column_by_name(name).ok_or_else(|| {
                         lance::Error::invalid_input(format!("no column '{name}' to widen"))
@@ -162,51 +245,5 @@ async fn rewrite(dataset: &mut Dataset, columns: &[(Field, Field)]) -> Result<()
         }),
         output_schema: output,
         result_checkpoint: None,
-    };
-    let paths: Vec<String> = old.iter().map(|name| format_field_path(&[name])).collect();
-    dataset
-        .add_columns(NewColumnTransform::BatchUDF(udf), Some(paths.clone()), None)
-        .await?;
-    let paths: Vec<&str> = paths.iter().map(String::as_str).collect();
-    dataset.drop_columns(&paths).await?;
-    rename_temporary(dataset).await
-}
-
-/// Finish or undo a widen that stopped between its commits.
-async fn finish_interrupted(dataset: &mut Dataset) -> Result<()> {
-    let schema = Schema::from(dataset.schema());
-    // A temporary column next to its original: the widen stopped before the
-    // drop, so the original is complete.
-    let stale: Vec<String> = temporary_columns(&schema)
-        .filter(|(_, original)| schema.field_with_name(original).is_ok())
-        .map(|(temporary, _)| format_field_path(&[temporary]))
-        .collect();
-    if !stale.is_empty() {
-        let stale: Vec<&str> = stale.iter().map(String::as_str).collect();
-        dataset.drop_columns(&stale).await?;
     }
-    rename_temporary(dataset).await
-}
-
-/// Rename each temporary column to its original name.
-async fn rename_temporary(dataset: &mut Dataset) -> Result<()> {
-    let schema = Schema::from(dataset.schema());
-    let renames: Vec<ColumnAlteration> = temporary_columns(&schema)
-        .map(|(temporary, original)| {
-            ColumnAlteration::new(format_field_path(&[temporary])).rename(original.to_string())
-        })
-        .collect();
-    if !renames.is_empty() {
-        dataset.alter_columns(&renames).await?;
-    }
-    Ok(())
-}
-
-/// The temporary columns of `schema`, with their original names.
-fn temporary_columns(schema: &Schema) -> impl Iterator<Item = (&str, &str)> {
-    schema.fields().iter().filter_map(|field| {
-        let name = field.name().as_str();
-        name.strip_prefix(TEMPORARY_PREFIX)
-            .map(|original| (name, original))
-    })
 }

@@ -109,7 +109,7 @@ async fn projected_read_of_many_variables() {
     let start = Instant::now();
     let rows = stream::iter((0..sizes.datasets).map(|i| Ok(sizes.dataset(i))));
     let options = WriteOptions {
-        max_rows_per_commit: env("LANCE_ND_ROWS_PER_COMMIT", 1024),
+        max_rows_per_group: env("LANCE_ND_ROWS_PER_COMMIT", 1024),
         ..WriteOptions::default()
     };
     let dataset = write(uri, rows, &options).await.unwrap();
@@ -211,7 +211,11 @@ async fn threaded_projected_read() {
     let batch_bytes = std::env::var("LANCE_ND_BATCH_SIZE_BYTES")
         .ok()
         .and_then(|v| v.parse::<u64>().ok());
-    let row_default = if batch_bytes.is_some() { u32::MAX as usize } else { 256 };
+    let row_default = if batch_bytes.is_some() {
+        u32::MAX as usize
+    } else {
+        256
+    };
     let batch_size = env("LANCE_ND_BATCH_SIZE", row_default);
     let batch_bytes = batch_bytes.unwrap_or(32 << 20);
     let cpus = std::thread::available_parallelism().unwrap().get();
@@ -222,7 +226,7 @@ async fn threaded_projected_read() {
     let start = Instant::now();
     let rows = stream::iter((0..sizes.datasets).map(|i| Ok(sizes.dataset(i))));
     let options = WriteOptions {
-        max_rows_per_commit: env("LANCE_ND_ROWS_PER_COMMIT", 1024),
+        max_rows_per_group: env("LANCE_ND_ROWS_PER_COMMIT", 1024),
         ..WriteOptions::default()
     };
     let dataset = Arc::new(write(uri, rows, &options).await.unwrap());

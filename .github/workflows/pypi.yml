@@ -12,6 +12,9 @@ env:
   PROTOC_VERSION: "29.3"
 
 jobs:
+  ci:
+    uses: ./.github/workflows/ci.yml
+
   linux:
     strategy:
       matrix:
@@ -95,7 +98,7 @@ jobs:
           path: python/dist
 
   publish:
-    needs: [linux, macos, windows, sdist]
+    needs: [ci, linux, macos, windows, sdist]
     runs-on: ubuntu-24.04
     environment: pypi
     permissions:

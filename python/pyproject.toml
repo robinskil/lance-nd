@@ -11,7 +11,7 @@ requires-python = ">=3.10"
 dependencies = ["numpy", "pyarrow", "xarray"]
 
 [project.optional-dependencies]
-dev = ["mypy", "pytest"]
+dev = ["cftime", "dask", "mypy", "pandas-stubs", "pytest"]
 
 [tool.maturin]
 module-name = "lance_nd._lance_nd"
@@ -23,6 +23,6 @@ files = ["lance_nd"]
 strict = true
 
 [[tool.mypy.overrides]]
-# pyarrow has no type information.
-module = ["pyarrow", "pyarrow.*"]
+# pyarrow and cftime have no type information.
+module = ["cftime", "pyarrow", "pyarrow.*"]
 ignore_missing_imports = true

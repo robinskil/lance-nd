@@ -182,7 +182,7 @@ async fn many_datasets_with_varying_variables() {
     let dir = tempfile::tempdir().unwrap();
     let expected: Vec<NdRecordBatch> = (0..500).map(varied).collect();
     let options = WriteOptions {
-        max_rows_per_commit: 64,
+        max_rows_per_group: 64,
         ..Default::default()
     };
     let dataset = write(&uri(&dir), rows(expected.clone()), &options)

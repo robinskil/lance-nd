@@ -285,7 +285,7 @@ mod tables {
         let dir = tempfile::tempdir().unwrap();
         let uri = uri(&dir);
         let options = WriteOptions {
-            max_rows_per_commit: 1,
+            max_rows_per_group: 1,
             ..with_stats()
         };
         let mut dataset = write(

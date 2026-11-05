@@ -14,6 +14,7 @@ use lance::dataset::{CommitBuilder, NewColumnTransform, WriteMode as LanceWriteM
 use lance::table::format::Fragment;
 use lance_core::datatypes::{OnMissing, OnTypeMismatch, Schema as LanceSchema};
 use nd_arrow_array::NdRecordBatch;
+use nd_arrow_array::extension::{GLOBAL_ATTRIBUTES_FIELD, is_global_attributes_field};
 use tokio::task::JoinHandle;
 
 use crate::cast::Casting;
@@ -188,12 +189,10 @@ impl NdWriter {
     }
 
     async fn write_encoded(&mut self, batch: RecordBatch) -> Result<()> {
-        if let Some(field) = batch
-            .schema()
-            .fields()
-            .iter()
-            .find(|field| is_stats_name(field.name()))
-        {
+        if let Some(field) = batch.schema().fields().iter().find(|field| {
+            is_stats_name(field.name())
+                || (field.name() == GLOBAL_ATTRIBUTES_FIELD && !is_global_attributes_field(field))
+        }) {
             return Err(Error::SchemaMismatch(format!(
                 "variable name '{}' is reserved, also each name that starts with {STATS_PREFIX}",
                 field.name()

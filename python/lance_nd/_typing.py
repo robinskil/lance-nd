@@ -1,10 +1,25 @@
 """Types for the options of the public API."""
 
-from typing import Literal, TypedDict
+from typing import Any, Literal, Protocol, TypedDict, Union
 
 Mode = Literal["create", "overwrite"]
 Casting = Literal["no", "safe", "same_kind", "promote"]
 OnDrop = Literal["warn", "raise", "ignore"]
+
+
+class ArrowStream(Protocol):
+    """Arrow data with the Arrow C stream interface, such as a ``pyarrow.Table``."""
+
+    def __arrow_c_stream__(self, requested_schema: Any = None) -> Any: ...
+
+
+class ArrowArray(Protocol):
+    """Arrow data with the Arrow C array interface, such as a ``pyarrow.RecordBatch``."""
+
+    def __arrow_c_array__(self, requested_schema: Any = None) -> tuple[Any, Any]: ...
+
+
+ArrowData = Union[ArrowStream, ArrowArray]
 
 
 class ColumnOptions(TypedDict, total=False):

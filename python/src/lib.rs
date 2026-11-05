@@ -1,7 +1,8 @@
 //! Python bindings for lance-nd.
 //!
 //! The module `lance_nd._lance_nd` holds the native classes. The Python
-//! package `lance_nd` wraps them and adds the xarray encoder.
+//! package `lance_nd` wraps them. The package `nd_arrow_array` converts
+//! between xarray datasets and nd record batches.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -9,9 +10,10 @@ use std::time::Duration;
 
 use arrow::array::RecordBatch;
 use arrow::datatypes::{DataType, Schema};
-use arrow::pyarrow::PyArrowType;
-use futures::StreamExt;
+use arrow::ffi_stream::ArrowArrayStreamReader;
+use arrow::pyarrow::{FromPyArrow, PyArrowType, ToPyArrow};
 use futures::stream::BoxStream;
+use futures::{StreamExt, stream};
 use lance::Dataset;
 use lance_datafusion::planner::Planner;
 use lance_nd::datafusion::common::DFSchema;
@@ -26,6 +28,7 @@ use nd_arrow_array::NdRecordBatch;
 use pyo3::create_exception;
 use pyo3::exceptions::{PyException, PyValueError};
 use pyo3::prelude::*;
+use pyo3::sync::PyOnceLock;
 use pyo3::types::PyDict;
 use tokio::runtime::Runtime;
 
@@ -80,6 +83,28 @@ struct Writer {
 impl Writer {
     fn take(&self) -> PyResult<NdWriter> {
         self.inner.lock().unwrap().take().ok_or_else(closed)
+    }
+
+    /// Run `write` on the open writer without the GIL.
+    fn run<F>(&self, py: Python<'_>, write: impl FnOnce(NdWriter) -> F) -> PyResult<()>
+    where
+        F: Future<Output = (NdWriter, lance_nd::Result<()>)> + Send,
+    {
+        let (writer, result) = block_on(py, write(self.take()?));
+        // The writer stays open after a failed write; its finish() then fails.
+        *self.inner.lock().unwrap() = Some(writer);
+        result.map_err(to_py)
+    }
+}
+
+/// The record batches of `data`, which has the Arrow C stream or array interface.
+fn read_arrow(data: &Bound<'_, PyAny>) -> PyResult<Vec<RecordBatch>> {
+    if data.hasattr("__arrow_c_stream__")? {
+        ArrowArrayStreamReader::from_pyarrow_bound(data)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| to_py(error.into()))
+    } else {
+        Ok(vec![RecordBatch::from_pyarrow_bound(data)?])
     }
 }
 
@@ -178,13 +203,38 @@ impl Writer {
         })
     }
 
-    /// Write the datasets of an nd-arrow record batch, one per row, without a commit.
-    fn write_batch(&self, py: Python<'_>, batch: PyArrowType<RecordBatch>) -> PyResult<()> {
-        let mut writer = self.take()?;
-        let result = block_on(py, writer.write_batch(batch.0));
-        // The writer stays open after a failed write; its finish() then fails.
-        *self.inner.lock().unwrap() = Some(writer);
-        result.map_err(to_py)
+    /// Write Arrow data in the nd-arrow format, one dataset per row,
+    /// without a commit. `data` has the Arrow C stream or array interface.
+    fn write(&self, py: Python<'_>, data: &Bound<'_, PyAny>) -> PyResult<()> {
+        let batches = read_arrow(data)?;
+        self.run(py, |mut writer| async move {
+            for batch in batches {
+                if let Err(error) = writer.write_batch(batch).await {
+                    return (writer, Err(error));
+                }
+            }
+            (writer, Ok(()))
+        })
+    }
+
+    /// Write `rows`, each Arrow data in the nd-arrow format, as one group of
+    /// datasets without a commit.
+    fn write_rows(&self, py: Python<'_>, rows: Vec<Bound<'_, PyAny>>) -> PyResult<()> {
+        let mut decoded = Vec::new();
+        for row in &rows {
+            for batch in read_arrow(row)? {
+                decoded.extend(
+                    NdRecordBatch::try_from_record_batch(&batch)
+                        .map_err(|error| to_py(error.into()))?,
+                );
+            }
+        }
+        self.run(py, |mut writer| async move {
+            let result = writer
+                .write(stream::iter(decoded.into_iter().map(Ok)))
+                .await;
+            (writer, result)
+        })
     }
 
     /// Commit all written datasets in one new table version.
@@ -413,7 +463,6 @@ impl Table {
     }
 }
 
-/// The whole table as one nd-arrow record batch. For tests only.
 /// A stream of nd record batches, one per dataset of the table.
 #[pyclass(module = "lance_nd._lance_nd")]
 struct Scanner {
@@ -426,8 +475,8 @@ impl Scanner {
         slf
     }
 
-    /// The next dataset as a record batch of one row.
-    fn __next__(&self, py: Python<'_>) -> PyResult<Option<PyArrowType<RecordBatch>>> {
+    /// The next dataset as an `nd_arrow_array.NdRecordBatch`.
+    fn __next__(&self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
         let mut rows = self.rows.lock().map_err(|_| closed())?;
         let Some(stream) = rows.as_mut() else {
             return Ok(None);
@@ -435,7 +484,8 @@ impl Scanner {
         match block_on(py, stream.next()) {
             Some(row) => {
                 let row = row.map_err(to_py)?;
-                Ok(Some(PyArrowType(encode_rows(&[row]).map_err(to_py)?)))
+                let batch = encode_rows(&[row]).map_err(to_py)?;
+                Ok(Some(to_nd_batch(py, batch)?))
             }
             None => {
                 *rows = None;
@@ -445,6 +495,18 @@ impl Scanner {
     }
 }
 
+/// The one-row `batch` as an `nd_arrow_array.NdRecordBatch`.
+fn to_nd_batch(py: Python<'_>, batch: RecordBatch) -> PyResult<Py<PyAny>> {
+    static FROM_ARROW: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+    let from_arrow = FROM_ARROW.get_or_try_init(py, || {
+        let class = py.import("nd_arrow_array")?.getattr("NdRecordBatch")?;
+        Ok::<_, PyErr>(class.getattr("from_arrow")?.unbind())
+    })?;
+    let rows = from_arrow.call1(py, (batch.to_pyarrow(py)?,))?;
+    Ok(rows.bind(py).get_item(0)?.unbind())
+}
+
+/// The whole table as one nd-arrow record batch. For tests only.
 #[pyfunction]
 fn _scan_batch(py: Python<'_>, uri: String) -> PyResult<PyArrowType<RecordBatch>> {
     let batch = block_on(py, async {

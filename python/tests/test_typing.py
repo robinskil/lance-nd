@@ -20,7 +20,7 @@ writer = lance_nd.create(
     write_parallelism=2,
     casting="safe",
 )
-writer.write(xr.Dataset(), chunks=["time"], on_drop="ignore", convert_calendar=True)
+writer.write(xr.Dataset(), chunks=["time"], on_drop="ignore")
 table = writer.finish()
 version: int = table.version
 names: list[str] = lance_nd.open("t.lance").variables()
@@ -31,7 +31,7 @@ compacted: dict[str, int] = table.compact(target_fragment_bytes=64 << 20, delete
 removed: dict[str, int] = table.cleanup_old_versions(datetime.timedelta(days=1))
 scanner: lance_nd.Scanner = table.scan(project=["sst"], filter="sst.attrs.units = 'K'", prune="sst.values > 1", limit=10)
 for batch in scanner:
-    rows: int = batch.num_rows
+    ds: xr.Dataset = batch.to_xarray()
 """
 
 BAD = """

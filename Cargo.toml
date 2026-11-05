@@ -23,7 +23,7 @@ futures = "0.3"
 lance = { version = "11", default-features = false }
 lance-core = "11"
 lance-file = "11"
-nd-arrow-array = { git = "https://github.com/robinskil/nd-arrow-array" }
+nd-arrow-array = "0.5"
 thiserror = "2"
 tokio = { version = "1", features = ["rt"] }
 tracing = "0.1"

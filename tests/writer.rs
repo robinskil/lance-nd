@@ -520,8 +520,14 @@ async fn write_batch_rejects_bad_columns() {
     let mut columns = encoded.columns().to_vec();
     fields.push(fields[0].clone().with_name("__stats__"));
     columns.push(columns[0].clone());
-    let reserved = RecordBatch::try_new(Arc::new(Schema::new(fields)), columns).unwrap();
+    let reserved =
+        RecordBatch::try_new(Arc::new(Schema::new(fields.clone())), columns.clone()).unwrap();
     assert!(writer.write_batch(reserved).await.is_err());
+
+    let global = Schema::new(vec![fields[0].clone().with_name("__global_attrs__")]);
+    let global = RecordBatch::try_new(Arc::new(global), vec![columns[0].clone()]).unwrap();
+    let error = writer.write_batch(global).await.unwrap_err();
+    assert!(error.to_string().contains("__global_attrs__"), "{error}");
 }
 
 /// A `(prof, level)` Float32 variable `psal` with nulls in its values.

@@ -3,14 +3,14 @@
 Store xarray datasets as N-dimensional Arrow arrays in a
 [lance-nd](../README.md) table.
 
-The package does four things:
+The package does three things:
 
-1. It encodes an `xarray.Dataset` as a PyArrow record batch in the
-   [nd-arrow format](https://github.com/robinskil/nd-arrow-array/blob/main/FORMAT.md).
-2. It passes the record batch to Rust.
-3. Rust writes the datasets to a lance-nd table, and commits all of them in
+1. It converts each `xarray.Dataset` to an `NdRecordBatch` of the
+   [nd-arrow-array](https://pypi.org/project/nd-arrow-array/) package.
+2. Rust writes the datasets to a lance-nd table, and commits all of them in
    one version when you call `finish()`.
-4. It reads the table back as a stream of nd-arrow record batches.
+3. It reads the table back as a stream of `NdRecordBatch` objects. Each
+   object gives its dataset with `to_xarray()`.
 
 ## Install
 
@@ -32,13 +32,14 @@ and writes are several times slower.
 
 ```python
 import xarray as xr
+from nd_arrow_array import NdRecordBatch
 import lance_nd
 
 # Create a table. Readers see nothing before finish().
 writer = lance_nd.create("data.lance")
 writer.write(ds_a)                       # an xarray.Dataset
 writer.write([ds_b, ds_c])               # a list of datasets
-writer.write(lance_nd.encode(ds_d))      # an nd-arrow pyarrow.RecordBatch
+writer.write(NdRecordBatch.from_xarray(ds_d))  # an nd_arrow_array.NdRecordBatch
 table = writer.finish()                  # one commit
 
 # Append to the table.
@@ -51,15 +52,13 @@ table.version, table.count_rows(), table.variables()
 
 | Function | Purpose |
 |---|---|
-| `encode(datasets, chunks=None)` | Encode one dataset or a list of datasets. Each dataset is one row, or each dask chunk with `chunks`. |
-| `encode_chunks(ds, chunks)` | Encode one dask chunk at a time, one record batch per chunk. |
 | `create(uri, mode="create")` | A writer for a new table. `mode="overwrite"` replaces the table at `finish()`. |
 | `append(uri)` | A writer for an existing table. |
 | `open(uri)` | The table at its current version. |
-| `Writer.write(data, chunks=None)` | Write datasets as data files, without a commit. With `chunks`, one chunk at a time. |
+| `Writer.write(data, chunks=None)` | Write datasets as data files, without a commit. `data` is an `xarray.Dataset`, an `NdRecordBatch`, a list of these, or nd-arrow Arrow data such as a `pyarrow.RecordBatch`. With `chunks`, one chunk at a time. |
 | `Writer.finish()` | Commit all written datasets in one version. |
 | `Writer.abort()` | Drop all written datasets. |
-| `Table.scan(project=None, filter=None, prune=None, limit=None)` | Read the datasets as a stream of nd-arrow record batches. |
+| `Table.scan(project=None, filter=None, prune=None, limit=None)` | Read the datasets as a stream of `NdRecordBatch` objects. |
 | `Table.delete(predicate)`, `Table.compact()` and `Table.cleanup_old_versions()` | Delete datasets and free disk space. |
 | `Table.versions()`, `Table.checkout(version)` and `Table.restore(version)` | List the versions, read an earlier version, or make an earlier version the latest in a new commit. |
 
@@ -94,9 +93,6 @@ ds = xr.open_dataset("ocean.nc", chunks={"time": 24, "depth": 100})
 
 with lance_nd.create("ocean.lance") as writer:
     writer.write(ds, chunks=["time", "depth"], on_drop="warn")
-
-for batch in lance_nd.encode_chunks(ds, chunks=["time", "depth"]):
-    ...                                  # one record batch per chunk
 ```
 
 - `chunks` names the chunk dimensions. Each row is one dask chunk over
@@ -111,9 +107,7 @@ for batch in lance_nd.encode_chunks(ds, chunks=["time", "depth"]):
   drops them silently.
 - Kept variables keep their attributes. Each row keeps the global
   attributes.
-- `writer.write(..., chunks=...)` and `encode_chunks` compute one chunk at
-  a time. `encode(ds, chunks=...)` returns all chunks in one record batch,
-  so it loads all data.
+- `writer.write(..., chunks=...)` computes one chunk at a time.
 
 ### Encoding options
 
@@ -145,9 +139,9 @@ row, in one column `__stats__:<variable>` for each variable. A scan with
 
 ### Read
 
-`Table.scan()` reads the datasets as a stream. Each item is a
-`pyarrow.RecordBatch` of one row in the nd-arrow format: one nd column per
-variable of the dataset, and the `__global_attrs__` column. The scan reads
+`Table.scan()` reads the datasets as a stream. Each item is an
+`nd_arrow_array.NdRecordBatch` with one nd array per variable and the
+global attributes. `to_xarray()` gives the `xarray.Dataset`. The scan reads
 only a few Lance batches ahead, so memory stays small for a large table.
 
 ```python
@@ -157,7 +151,7 @@ for batch in table.scan(
     filter="__global_attrs__.title = 'run 1'",
     prune="sst.values > 300",
 ):
-    values = batch.column("sst")[0]["values"]
+    ds = batch.to_xarray()
 ```
 
 - `project` takes whole variable names. Each batch keeps the global
@@ -261,63 +255,34 @@ annotations:
 | `lance_nd.ColumnOptions` | the option set of one column, a `TypedDict` |
 | `lance_nd.Mode` | `"create"`, `"overwrite"` |
 | `lance_nd.OnDrop` | `"warn"`, `"raise"`, `"ignore"` |
+| `lance_nd.ArrowData` | Arrow data with the Arrow C stream or array interface |
 
 Run `mypy` in `python/` to check the package in strict mode.
 
 ## Encoding rules
 
+The nd-arrow-array package converts xarray datasets, see its documentation
+for the value types, the attribute types, missing values, coordinates and
+calendars. In short:
+
 | xarray | nd-arrow |
 |---|---|
 | One `Dataset` | One row |
 | Each data variable and coordinate | One `nd_arrow.array` column |
-| `Variable.values` | `values`, flat in C order |
-| `Variable.dims` and `Variable.shape` | `dim_names` and `dim_sizes` |
-| `Variable.attrs` | `attrs` |
+| `Variable.attrs` | the `attrs` of the array |
 | `Dataset.attrs` | the `__global_attrs__` column |
 | `Variable.encoding`, `Dataset.encoding` | not written |
 
-Value types:
+lance-nd adds these rules:
 
-| NumPy dtype | Arrow type |
-|---|---|
-| `bool` | `Boolean` |
-| integers | the same integer type |
-| `float16`, `float32`, `float64` | the same float type |
-| `datetime64[unit]` | `Timestamp(unit)` |
-| `timedelta64[unit]` | `Duration(unit)` |
-| `str`, `bytes`, `object` with strings | `Utf8` |
-| `object` with cftime values, with `convert_calendar=True` | `Timestamp(ns)` |
-| other dtypes | `TypeError` |
-
-Missing values: NaN, NaT and `None` become nulls. Big-endian data and
-arrays in Fortran order are converted. Dask arrays are loaded into memory.
-
-Calendars: xarray decodes a calendar that `datetime64` cannot hold, such as
-a Julian one, into cftime objects. `encode()`, `encode_chunks()` and
-`Writer.write()` take `convert_calendar=True` to store them as
-`datetime64[ns]` values of the same instant. The calendar label changes: a
-Julian 1973-02-25 becomes the Gregorian 1973-03-10. A calendar without real
-instants, such as `360_day` or `noleap`, and a date outside 1677 to 2262
-raise a `ValueError`. Without the option, cftime values raise a
-`TypeError`. To keep the raw numbers with their `units` and `calendar`
-attributes instead, open the files with `decode_times=False`.
-
-Attribute types: `str`, `bool`, `int` (`Int64`), `float` (`Float64`),
-NumPy scalars, and 1-D arrays, lists or tuples of one scalar type. Other
-values raise a `TypeError`.
-
-Coordinates: each data variable gets a CF `coordinates` attribute with the
-names of its other coordinates, for example `"lat2d lon2d"`. A coordinate
-with the name of its only dimension, such as `lat (lat)`, is not listed.
-Coordinates that no data variable lists go into a global `coordinates`
-attribute. A dataset or variable that already has a `coordinates`
-attribute raises a `ValueError`.
-
-In a list of datasets, one variable must have one value type, and one
-attribute key must have one type. An attribute that is an empty array, such
-as `[]`, holds no value, so the encoder leaves it out. One `write()` call holds at most
-2,147,483,647 values per variable over all its datasets. For more, write
-fewer datasets per call.
+- An attribute that is an empty array, such as `[]`, holds no value, so the
+  writer leaves it out.
+- The variable name `__global_attrs__` and each name that starts with
+  `__stats__` are reserved. They raise `SchemaMismatchError`.
+- Datasets can have different variables. A dataset without a variable has
+  a null in its column. One variable must have one value type, see
+  [Casting](#casting).
+- Dask arrays are loaded into memory, one dataset or one chunk at a time.
 
 ### Object stores
 

@@ -32,6 +32,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      # Fails when a dependency is not on crates.io. The test jobs build the crate.
+      - run: cargo package -p lance-nd --no-verify
 
   rust:
     strategy:

@@ -6,7 +6,9 @@ import pytest
 import xarray as xr
 
 import lance_nd
-from lance_nd import LanceNdError, encode
+from nd_arrow_array import NdRecordBatch
+
+from lance_nd import LanceNdError
 from lance_nd._lance_nd import _scan_batch
 
 
@@ -22,7 +24,7 @@ def test_spec_example(table_uri):
     writer = lance_nd.create(table_uri)
     writer.write(dataset("a"))
     writer.write([dataset("b"), dataset("c")])
-    writer.write(encode(dataset("d")))
+    writer.write(NdRecordBatch.from_xarray(dataset("d")))
     table = writer.finish()
     assert table.count_rows() == 4
     assert table.version == 1
@@ -202,7 +204,7 @@ def sst_dataset(title, values):
 
 
 def titles(batches):
-    return [batch.column("__global_attrs__")[0]["title"].as_py() for batch in batches]
+    return [batch.attrs["title"] for batch in batches]
 
 
 @pytest.fixture
@@ -217,24 +219,25 @@ def ocean(table_uri):
 def test_scan_streams_nd_record_batches(ocean):
     scanner = ocean.scan()
     first = next(scanner)
-    assert isinstance(first, pa.RecordBatch)
-    assert first.num_rows == 1
-    assert set(first.schema.names) == {"sst", "time", "__global_attrs__"}
+    assert isinstance(first, NdRecordBatch)
+    assert set(first.keys()) == {"sst", "time"}
     rest = list(scanner)
     assert titles([first, *rest]) == ["a", "b", "c"]
-    assert rest[0].column("sst")[0]["values"].as_py() == [5.0, 6.0, 7.0]
+    assert rest[0]["sst"].to_numpy().tolist() == [5.0, 6.0, 7.0]
+    xr.testing.assert_identical(first.to_xarray(), sst_dataset("a", [1.0, 2.0]))
 
 
 def test_scan_project_filter_and_limit(ocean):
     batches = list(ocean.scan(project=["sst"]))
-    assert all(batch.schema.names == ["sst", "__global_attrs__"] for batch in batches)
+    assert all(batch.keys() == ["sst"] for batch in batches)
     assert titles(ocean.scan(filter="__global_attrs__.title = 'b'")) == ["b"]
     assert titles(ocean.scan(filter="sst.attrs.units = 'K'", limit=2)) == ["a", "b"]
 
 
 def test_scan_empty_projection_reads_global_attributes(ocean):
     batches = list(ocean.scan(project=[]))
-    assert [batch.schema.names for batch in batches] == [["__global_attrs__"]] * 3
+    assert [batch.keys() for batch in batches] == [[]] * 3
+    assert titles(batches) == ["a", "b", "c"]
 
 
 def test_scan_prune_uses_stats(ocean):
@@ -280,16 +283,18 @@ def test_rejected_write_keeps_the_writer(table_uri):
 def test_empty_array_attribute_is_dropped(table_uri):
     ds = resolution_dataset("b", np.array([], dtype=np.float64))
     ds.attrs["history"] = []
-    batch = encode(ds)
-    assert "resolution" not in batch.column("sst").type.field("attrs").type.names
-    assert "history" not in batch.column("__global_attrs__").type.names
     only_empty = xr.Dataset({"x": (("n",), np.array([1.0]), {"res": np.array([])})})
-    assert "attrs" not in only_empty.pipe(encode).column("x").type.names
     with lance_nd.create(table_uri) as writer:
         writer.write(resolution_dataset("a", 0.5))
         writer.write(ds)
         writer.write(only_empty)
-    assert lance_nd.open(table_uri).count_rows() == 3
+    rows = list(lance_nd.open(table_uri).scan())
+    assert len(rows) == 3
+    assert "resolution" not in rows[1]["sst"].attrs
+    assert "history" not in rows[1].attrs
+    assert "res" not in rows[2]["x"].attrs
+    # The dataset of the caller keeps its attributes.
+    assert "history" in ds.attrs
 
 
 def typed_dataset(title, dtype):
@@ -297,7 +302,7 @@ def typed_dataset(title, dtype):
 
 
 def sst_types(table):
-    return [str(batch.column("sst").type.field("values").type.value_type) for batch in table.scan()]
+    return [batch["sst"].dtype for batch in table.scan()]
 
 
 def test_casting_default_rejects_another_type(table_uri):

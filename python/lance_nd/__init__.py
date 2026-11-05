@@ -1,7 +1,6 @@
 """N-dimensional Arrow arrays, stored in Lance."""
 
 from lance_nd._api import Scanner, Table, Writer, append, create, open
-from lance_nd._encode import encode, encode_chunks
 from lance_nd._lance_nd import (
     CommitConflictError,
     InvalidTableError,
@@ -10,9 +9,10 @@ from lance_nd._lance_nd import (
     TableExistsError,
     TableNotFoundError,
 )
-from lance_nd._typing import Casting, ColumnOptions, Mode, OnDrop
+from lance_nd._typing import ArrowData, Casting, ColumnOptions, Mode, OnDrop
 
 __all__ = [
+    "ArrowData",
     "Casting",
     "ColumnOptions",
     "CommitConflictError",
@@ -28,7 +28,5 @@ __all__ = [
     "Writer",
     "append",
     "create",
-    "encode",
-    "encode_chunks",
     "open",
 ]

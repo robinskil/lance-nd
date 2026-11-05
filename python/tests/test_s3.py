@@ -38,7 +38,7 @@ def test_round_trip_on_s3():
         writer.write(ds)
     table = lance_nd.open(uri, storage_options=storage_options())
     assert table.count_rows() == 2
-    assert sum(batch.num_rows for batch in table.scan()) == 2
+    assert len(list(table.scan())) == 2
 
 
 def test_open_a_missing_table_fails():

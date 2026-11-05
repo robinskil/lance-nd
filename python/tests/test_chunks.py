@@ -6,7 +6,13 @@ import pytest
 import xarray as xr
 
 import lance_nd
-from lance_nd import encode, encode_chunks
+from lance_nd._chunks import split_chunks
+from nd_arrow_array import NdRecordBatch, encode_batches
+
+
+def encode(ds, chunks, on_drop="warn"):
+    """The chunks of `ds` as one record batch, one row per chunk."""
+    return encode_batches([NdRecordBatch.from_xarray(part) for part in split_chunks(ds, chunks, on_drop)])
 
 
 def ocean():
@@ -100,7 +106,7 @@ def test_cf_coordinates_list_only_kept_variables():
     assert batch.column("temp")[0].as_py()["attrs"]["coordinates"] == "depth_label"
 
 
-def test_encode_chunks_is_lazy():
+def test_split_chunks_is_lazy():
     computed = []
 
     def block(x, block_info=None):
@@ -109,10 +115,9 @@ def test_encode_chunks_is_lazy():
 
     data = da.map_blocks(block, da.zeros((4,), chunks=2), dtype="float64")
     ds = xr.Dataset({"v": (("time",), data)})
-    batches = encode_chunks(ds, chunks=["time"])
+    batches = (NdRecordBatch.from_xarray(part) for part in split_chunks(ds, chunks=["time"]))
     assert computed == []
-    first = next(batches)
-    assert first.num_rows == 1
+    next(batches)
     assert len(computed) == 1
     assert len(list(batches)) == 1
     assert len(computed) == 2
@@ -131,9 +136,12 @@ def test_write_record_batch_with_chunks_raises(table_uri):
     writer = lance_nd.create(table_uri)
     with pytest.raises(TypeError):
         writer.write(encode(ocean(), chunks=["time"], on_drop="ignore"), chunks=["time"])
+    with pytest.raises(TypeError):
+        writer.write(NdRecordBatch.from_xarray(ocean().drop_vars(["sst", "station_name"])), chunks=["time"])
     writer.abort()
 
 
-def test_list_of_datasets():
-    batch = encode([ocean(), ocean()], chunks=["time", "depth"], on_drop="ignore")
-    assert batch.num_rows == 8
+def test_list_of_datasets(table_uri):
+    with lance_nd.create(table_uri) as writer:
+        writer.write([ocean(), ocean()], chunks=["time", "depth"], on_drop="ignore")
+    assert lance_nd.open(table_uri).count_rows() == 8

@@ -4,8 +4,9 @@ import datetime
 from collections.abc import Iterator
 
 import pyarrow as pa
+from nd_arrow_array import NdRecordBatch
 
-from lance_nd._typing import Casting, ColumnOptions, Mode
+from lance_nd._typing import ArrowData, Casting, ColumnOptions, Mode
 
 class LanceNdError(Exception):
     """An error from lance-nd or Lance."""
@@ -60,8 +61,11 @@ class Writer:
     ) -> Writer:
         """A writer that appends to an existing table."""
 
-    def write_batch(self, batch: pa.RecordBatch) -> None:
-        """Write the datasets of an nd-arrow record batch, one per row, without a commit."""
+    def write(self, data: ArrowData) -> None:
+        """Write Arrow data in the nd-arrow format, one dataset per row, without a commit."""
+
+    def write_rows(self, rows: list[ArrowData]) -> None:
+        """Write Arrow data in the nd-arrow format as one group of datasets, without a commit."""
 
     def finish(self) -> Table:
         """Commit all written datasets in one new table version."""
@@ -168,15 +172,15 @@ class Table:
         ``bytes_removed`` and ``old_versions``.
         """
 
-class Scanner(Iterator[pa.RecordBatch]):
+class Scanner(Iterator[NdRecordBatch]):
     """A stream of nd record batches, one per dataset of the table.
 
-    Each item is a record batch of one row: one nd column per variable of
-    the dataset, and the ``__global_attrs__`` column.
+    Each item is an ``nd_arrow_array.NdRecordBatch``. Its ``to_xarray()``
+    gives the dataset as an ``xarray.Dataset``.
     """
 
     def __iter__(self) -> Scanner: ...
-    def __next__(self) -> pa.RecordBatch: ...
+    def __next__(self) -> NdRecordBatch: ...
 
 def _scan_batch(uri: str) -> pa.RecordBatch:
     """The whole table as one nd-arrow record batch. For tests only."""

@@ -9,7 +9,12 @@ description = "Store xarray datasets as N-dimensional Arrow arrays in Lance"
 readme = "README.md"
 license = { text = "Apache-2.0" }
 requires-python = ">=3.10"
-dependencies = ["numpy>=1.24", "pyarrow>=14", "xarray>=2023.1"]
+dependencies = [
+    "nd-arrow-array[arrow,xarray]>=0.5,<0.6",
+    "numpy>=1.24",
+    "pyarrow>=14",
+    "xarray>=2023.1",
+]
 keywords = ["arrow", "lance", "xarray", "netcdf", "n-dimensional"]
 classifiers = [
     "Development Status :: 3 - Alpha",
@@ -30,7 +35,7 @@ Repository = "https://github.com/robinskil/lance-nd"
 Issues = "https://github.com/robinskil/lance-nd/issues"
 
 [project.optional-dependencies]
-dev = ["cftime", "dask", "mypy", "pandas-stubs", "pytest"]
+dev = ["dask", "mypy", "pandas-stubs", "pytest"]
 
 [tool.maturin]
 module-name = "lance_nd._lance_nd"
@@ -42,6 +47,6 @@ files = ["lance_nd"]
 strict = true
 
 [[tool.mypy.overrides]]
-# pyarrow and cftime have no type information.
-module = ["cftime", "pyarrow", "pyarrow.*"]
+# pyarrow has no type information.
+module = ["pyarrow", "pyarrow.*"]
 ignore_missing_imports = true

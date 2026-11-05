@@ -2,16 +2,47 @@
 
 from collections.abc import Sequence
 from types import TracebackType
+from typing import Any, TypeGuard
 
-import pyarrow as pa
+import numpy as np
 import xarray as xr
+from nd_arrow_array import NdRecordBatch
 
 from lance_nd import _lance_nd
-from lance_nd._encode import encode, encode_chunks
-from lance_nd._typing import Casting, ColumnOptions, Mode, OnDrop
+from lance_nd._chunks import split_chunks
+from lance_nd._typing import ArrowData, Casting, ColumnOptions, Mode, OnDrop
 
 Table = _lance_nd.Table
 Scanner = _lance_nd.Scanner
+
+
+def _is_arrow(data: object) -> TypeGuard[ArrowData]:
+    return hasattr(data, "__arrow_c_stream__") or hasattr(data, "__arrow_c_array__")
+
+
+def _row(item: xr.Dataset | NdRecordBatch) -> NdRecordBatch:
+    if isinstance(item, NdRecordBatch):
+        return item
+    return NdRecordBatch.from_xarray(_without_empty_attrs(item))
+
+
+def _is_empty(value: object) -> bool:
+    """``True`` for an attribute with no items, such as ``[]``."""
+    if isinstance(value, np.ndarray):
+        return value.ndim == 1 and value.size == 0
+    return isinstance(value, list | tuple) and len(value) == 0
+
+
+def _without_empty_attrs(ds: xr.Dataset) -> xr.Dataset:
+    """``ds`` without empty array attributes, which hold no value."""
+    owners: list[xr.Dataset | xr.Variable] = [ds, *ds.variables.values()]
+    if not any(_is_empty(value) for owner in owners for value in owner.attrs.values()):
+        return ds
+    ds = ds.copy(deep=False)
+    owners = [ds, *ds.variables.values()]
+    for owner in owners:
+        owner.attrs = {key: value for key, value in owner.attrs.items() if not _is_empty(value)}
+    return ds
 
 
 class Writer:
@@ -30,36 +61,50 @@ class Writer:
 
     def write(
         self,
-        data: xr.Dataset | Sequence[xr.Dataset] | pa.RecordBatch,
+        data: xr.Dataset | NdRecordBatch | ArrowData | Sequence[xr.Dataset | NdRecordBatch],
         chunks: Sequence[str] | None = None,
         on_drop: OnDrop = "warn",
-        convert_calendar: bool = False,
     ) -> None:
-        """Write a dataset, a list of datasets or an nd-arrow record batch.
+        """Write one or more datasets, without a commit.
 
-        With ``chunks``, each dask chunk of each dataset is one row. The
-        writer computes and writes one chunk at a time, see
-        :func:`lance_nd.encode_chunks`. ``convert_calendar`` turns cftime
-        values into ``datetime64[ns]``, see :func:`lance_nd.encode`.
+        ``data`` is an xarray dataset, an ``nd_arrow_array.NdRecordBatch``,
+        a list of these, or Arrow data in the nd-arrow format, such as a
+        ``pyarrow.RecordBatch`` with one dataset per row. Each dataset is
+        one row of the table.
+
+        With ``chunks``, each dask chunk over those dimensions is one row.
+        The writer computes and writes one chunk at a time. A variable is
+        kept when all its dimensions are chunk dimensions, or when it has
+        all chunk dimensions. ``on_drop`` is "warn", "raise" or "ignore" for
+        the other variables.
         """
-        if isinstance(data, pa.RecordBatch):
+        if isinstance(data, xr.Dataset | NdRecordBatch):
+            items: Sequence[Any] = [data]
+        elif _is_arrow(data):
             if chunks is not None:
-                raise TypeError("chunks needs xarray datasets, not a pyarrow.RecordBatch")
-            self._native.write_batch(data)
-        elif isinstance(data, xr.Dataset) or (
-            isinstance(data, Sequence) and not isinstance(data, str | bytes)
-        ):
-            if chunks is None:
-                self._native.write_batch(encode(data, convert_calendar=convert_calendar))
-                return
-            for ds in [data] if isinstance(data, xr.Dataset) else data:
-                for batch in encode_chunks(ds, chunks, on_drop, convert_calendar):
-                    self._native.write_batch(batch)
+                raise TypeError("chunks needs xarray datasets, not Arrow data")
+            self._native.write(data)
+            return
+        elif isinstance(data, Sequence) and not isinstance(data, str | bytes):
+            items = data
         else:
             raise TypeError(
-                "expected an xarray.Dataset, a list of them or a pyarrow.RecordBatch, "
+                "expected an xarray.Dataset, an NdRecordBatch, Arrow data or a list, "
                 f"not {type(data).__name__}"
             )
+        for item in items:
+            if not isinstance(item, xr.Dataset | NdRecordBatch):
+                raise TypeError(
+                    f"expected an xarray.Dataset or an NdRecordBatch, not {type(item).__name__}"
+                )
+        if chunks is None:
+            self._native.write_rows([_row(item) for item in items])
+            return
+        for item in items:
+            if isinstance(item, NdRecordBatch):
+                raise TypeError("chunks needs xarray datasets, not an NdRecordBatch")
+            for part in split_chunks(item, chunks, on_drop):
+                self._native.write(_row(part))
 
     def finish(self) -> Table:
         """Commit all written datasets in one new table version."""

@@ -40,9 +40,6 @@ jobs:
     needs: [ci, semver]
     runs-on: ubuntu-24.04
     environment: crates-io
-    permissions:
-      # Trusted publishing gets a short-lived token from this OIDC id.
-      id-token: write
     steps:
       - uses: actions/checkout@v7
       # Lance needs protoc to build.
@@ -50,8 +47,6 @@ jobs:
         with:
           tool: protoc@3.${{ env.PROTOC_VERSION }}
       - uses: dtolnay/rust-toolchain@stable
-      - uses: rust-lang/crates-io-auth-action@v1
-        id: auth
       - run: cargo publish -p lance-nd
         env:
-          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}

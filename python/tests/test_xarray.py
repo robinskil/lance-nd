@@ -159,3 +159,14 @@ def test_rejects_other_input(table_uri):
         with pytest.raises(TypeError):
             writer.write(42)
         writer.write(sea_surface())
+
+
+def test_bytes_become_text(table_uri):
+    ds = xr.Dataset(
+        {"station": ("n", np.array([b"ab", b"c\xc3\xa9"], dtype="S4"), {"code": b"x1"})},
+        attrs={"source": b"buoy"},
+    )
+    (read,) = round_trip(table_uri, ds)
+    assert read.station.values.tolist() == ["ab", "cé"]
+    assert read.station.attrs["code"] == "x1"
+    assert read.attrs["source"] == "buoy"

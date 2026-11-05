@@ -23,7 +23,34 @@ def _is_arrow(data: object) -> TypeGuard[ArrowData]:
 def _row(item: xr.Dataset | NdRecordBatch) -> NdRecordBatch:
     if isinstance(item, NdRecordBatch):
         return item
-    return NdRecordBatch.from_xarray(_without_empty_attrs(item))
+    return NdRecordBatch.from_xarray(_bytes_as_text(_without_empty_attrs(item)))
+
+
+def _text(value: Any) -> Any:
+    """``bytes`` and fixed-width byte arrays as UTF-8 text, other values as is."""
+    if isinstance(value, bytes):
+        return value.decode("utf-8")
+    if isinstance(value, np.ndarray) and value.dtype.kind == "S":
+        return np.char.decode(value, "utf-8")
+    return value
+
+
+def _bytes_as_text(ds: xr.Dataset) -> xr.Dataset:
+    """``ds`` with byte variables and attributes as text, which nd-arrow-array stores."""
+    owners: list[xr.Dataset | xr.Variable] = [ds, *ds.variables.values()]
+    has_bytes = any(var.dtype.kind == "S" for var in ds.variables.values()) or any(
+        _text(value) is not value for owner in owners for value in owner.attrs.values()
+    )
+    if not has_bytes:
+        return ds
+    ds = ds.copy(deep=False)
+    for name, var in ds.variables.items():
+        if var.dtype.kind == "S":
+            ds[name] = var.copy(data=_text(var.values))
+    owners = [ds, *ds.variables.values()]
+    for owner in owners:
+        owner.attrs = {key: _text(value) for key, value in owner.attrs.items()}
+    return ds
 
 
 def _is_empty(value: object) -> bool:

@@ -19,404 +19,60 @@
 </p>
 
 <p align="center">
-  <a href="#overview">Overview</a> ·
-  <a href="#data-model">Data model</a> ·
-  <a href="#the-lance-nd-table">lance-nd table</a> ·
-  <a href="#usage">Usage</a> ·
+  <a href="#install">Install</a> ·
+  <a href="#rust">Rust</a> ·
   <a href="#python">Python</a> ·
+  <a href="https://github.com/robinskil/lance-nd/wiki">Wiki</a> ·
   <a href="FORMAT.md">Specification</a>
 </p>
 
 ---
 
-## Overview
+lance-nd stores N-dimensional array data in a
+[Lance](https://lancedb.github.io/lance/) table. Each table row is one nd
+record batch of [nd-arrow-array](https://github.com/robinskil/nd-arrow-array):
+a set of named N-dimensional arrays with their dimensions and attributes,
+such as one xarray dataset.
 
-lance-nd is a general way to store N-dimensional array data in a
-[Lance](https://lancedb.github.io/lance/) table. It has two layers:
+- The Lance table schema **is** the nd-arrow encoding, so any Arrow or Lance
+  reader can read the data.
+- Rows can have different variables. New variables and attributes extend
+  the table schema.
+- Optional per-row stats let a scan skip rows on value filters.
+- Tables live on local disk, S3, Google Cloud Storage or Azure.
 
-| Layer | What it does |
-|---|---|
-| [nd-arrow-array](https://github.com/robinskil/nd-arrow-array) | Encodes nd arrow arrays and nd record batches as plain Apache Arrow data. |
-| lance-nd | Stores that Arrow data in Lance, one nd record batch per row. |
+## Install
 
-The Lance table schema **is** the nd-arrow encoding. lance-nd adds no extra
-columns and no private layout, so any Arrow or Lance reader can read the data.
-The one exception is opt-in: a table with stats has one extra
-`__stats__:<variable>` column per variable, see [Stats](#stats).
-
-## Data model
-
-lance-nd stores the data model of
-[nd-arrow-array](https://github.com/robinskil/nd-arrow-array). That repo
-defines the encoding. In short:
-
-- An **nd arrow array** is one N-dimensional array. As an Arrow column, it
-  is the extension type `nd_arrow.array` over a struct:
-
-  ```text
-  Struct {
-    values:    List<T>,       // the flat values, in C order
-    dim_names: List<Utf8>,    // the name of each dimension
-    dim_sizes: List<UInt32>,  // the size of each dimension
-    attrs:     Struct { .. }, // optional attributes, such as units
-  }
-  ```
-
-- An **nd record batch** is a set of named nd arrow arrays on one shared
-  grid, plus optional global attributes in the struct column
-  `__global_attrs__`.
-
-In Rust, these are `NdArrowArray` and `NdRecordBatch`. See the
-[nd-arrow FORMAT.md](https://github.com/robinskil/nd-arrow-array/blob/main/FORMAT.md)
-for the full rules.
-
-## The lance-nd table
-
-A lance-nd table is a Lance table. Each table row is one nd record batch:
-a complete one, or one chunk of a larger one.
-
-| Column | Type | Nullable |
-|---|---|---|
-| one column per array name | `nd_arrow.array` | yes |
-| `__global_attrs__` | `nd_arrow.global_attributes` | yes |
-
-For example, a table with three nd record batches:
-
-| Row | `x` | `y` | `temperature` | `pressure` | `__global_attrs__` |
-|---|---|---|---|---|---|
-| 0 | `(x=3)` | `(y=4)` | `(x=3, y=4)` | absent | `{id: "a"}` |
-| 1 | absent | absent | absent | `(station=3)` | `{id: "b"}` |
-| 2 | `(x=2)` | `(y=4)` | `(x=2, y=4)` | absent | `{id: "c"}` |
-
-### Array columns
-
-- The table has one column for each array name in any row.
-- A null in a row means that the nd record batch of that row does not have
-  that array. A reader leaves it out of the row.
-- One array name has one value type in a table. A write that changes the type
-  fails, unless `WriteOptions::casting` allows a cast, see
-  [Casting](#casting).
-
-### Schema evolution
-
-A write can bring new array names, new attribute keys and new global
-attributes. lance-nd adds them to the table schema first, then appends the
-rows. Older rows read the new arrays as absent.
-
-Lance can add nested fields only with file version 2.2 or later, so lance-nd
-creates tables with file version 2.2.
-
-### Casting
-
-`WriteOptions::casting` decides what a write does with a variable or an
-attribute that has another type than the table. The rules follow the
-`casting` argument of numpy:
-
-| `Casting` | A different type |
-|---|---|
-| `No` (default) | Rejects the write. |
-| `Safe` | Casts the new values when no value can change, for example `Float32` to `Float64` or `UInt16` to `Int32`. |
-| `SameKind` | Also casts within a kind, or to a later kind in the order bool, unsigned, signed, float, for example `Float64` to `Float32`. An integer that does not fit fails the write. |
-| `Promote` | As numpy type promotion. Casts as `Safe` when the new values fit the table type. Otherwise widens the variable in the table to the smallest type that holds both, for example `Int32` and `Float32` to `Float64`, then casts the new values. |
-
-With `No`, `Safe` and `SameKind`, the table type wins: a cast changes the
-new rows, never the table. So with `Safe`, a `Float64` variable cannot go
-into a `Float32` table. The
-cast comes before the stats, so the stats get the table type too. An
-attribute with a number in one row and an array in another row is never
-cast. `Promote` widens only variable values; attributes follow `Safe`.
-
-### Widen a variable
-
-`widen(&mut table, "sst", &DataType::Float64)` changes the value type of a
-variable in the table, and the type of its stats. The new type must hold
-each old value exactly, as `Safe` allows. Lance 11 cannot cast a nested
-field in place, so lance-nd writes the variable and its stats column again
-under new field ids, in one Lance commit. The other variables stay as they
-are.
-
-A writer that started before a widen and commits after it holds rows with
-the old field ids. Its commit fails with `Error::SchemaMismatch` and adds no
-rows. Write the rows again. A widen that a concurrent write preempts starts
-again, up to 10 times. Under `Promote`, the writers call `widen`
-themselves. An `NdWriter` then first commits the rows that it wrote before.
-
-### Rows and chunks
-
-The format does not separate a complete nd record batch from a chunk, and it
-has no reserved columns for names or positions. Put them in the global
-attributes, for example `id` or `chunk_offset`, then filter on them:
-
-```sql
-__global_attrs__.id = 'a'
+```toml
+[dependencies]
+lance-nd = "0.1"
+nd-arrow-array = "0.5"
 ```
 
-### Stats
+Turn on the cargo feature `aws`, `gcp` or `azure` for an object store.
+Lance needs `protoc` to build.
 
-A table created with `WriteOptions { stats: true, .. }` stores the min and the
-max of each variable per row. Each variable gets one stats column,
-`__stats__:<variable>`, with `min` and `max`. Null and NaN values do not
-count. Numeric, string, timestamp, date, time and duration variables get
-stats. An append writes stats when the table has them.
-
-A writer adds a variable and its stats column together. So a fragment holds
-only the stats columns of its own rows, and a stats filter also works on
-older fragments without the variable. In Lance SQL, the column name needs
-backticks: `` `__stats__:sst`.max ``.
-
-`lance_nd::datafusion` is the DataFusion version of Lance. Use it to build
-filters.
-
-### Pruning
-
-A scan with `filter_expr` uses the stats to skip the rows that surely have no
-matching value. lance-nd changes each part of the filter that reads
-`<variable>.values` into a test on the min and the max of the row:
-
-| Filter on the values | Filter on the stats |
-|---|---|
-| `v = x` | `min <= x AND max >= x` |
-| `v < x`, `v <= x` | `min < x`, `min <= x` |
-| `v > x`, `v >= x` | `max > x`, `max >= x` |
-| `v BETWEEN a AND b` | `max >= a AND min <= b` |
-| `v IN (x, y)` | The `=` test for each value, joined with `OR` |
-
-Then Lance reads only the rows that pass the stats test. For example, with
-the filter `lat.values BETWEEN 17.5 AND 25.4`:
-
-| Row | `lat` min | `lat` max | Result |
-|---|---|---|---|
-| 0 | -90 | -80 | skipped |
-| 1 | 17 | 30 | kept |
-| 2 | absent | absent | skipped: the row does not have `lat` |
-| 3 | null | null | kept: no value counts, for example all NaN |
-
-- A kept row comes back whole. It can hold values outside the filter.
-- A value part without a stats form keeps all rows, for example `NOT`,
-  `!=` or `t.values * 2 > 10`.
-- A table without stats keeps all rows for a value part.
-
-### Filters
-
-A filter for `filter_expr` uses the Lance table columns:
-
-```rust
-use lance_nd::datafusion::functions::core::expr_fn::get_field;
-use lance_nd::datafusion::prelude::{col, lit};
-
-let lat = get_field(col("lat"), "values");
-let units = get_field(get_field(col("sst"), "attrs"), "units");
-let id = get_field(col("__global_attrs__"), "id");
-let rows = scan(&table)
-    .filter_expr(lat.between(lit(17.5), lit(25.4)).and(units.eq(lit("K")).or(id.eq(lit("a")))))
-    .try_into_stream()
-    .await?;
-```
-
-lance-nd does not check or change the column names. A wrong name gives an
-error in the scan. In an `Expr`, write a nested column such as `sst.values`
-with `get_field`: Lance does not resolve `col("sst.values")`.
-
-A part that does not read values, for example on `__global_attrs__.id` or
-`sst.attrs.units`, filters the rows exactly, so it stays as it is. Parts
-combine with these rules:
-
-- `AND`: a side without a stats form goes away.
-- `OR`: both sides need a form, or the full `OR` keeps all rows.
-- `NOT`: only over parts that do not read values.
-
-Use one filter API for each case:
-
-| Filter | API |
-|---|---|
-| Lance SQL text | `filter` |
-| DataFusion `Expr` on the table columns, with values as stats | `filter_expr` |
-| DataFusion `Expr` on the Lance table columns, with no change | `lance_filter` |
-
-`filter_expr` and `lance_filter` can be used together. A row must then
-match both. `filter` cannot be used with one of them.
-
-A scan with a filter first reads only the filter columns. Then it reads the
-projected variables of the matching rows only. So a filter that matches few
-rows reads little data. A filter that matches all rows is a little slower
-than a scan without a filter. `NdScanner::explain_plan` shows the reads.
-
-### Column encoding
-
-Each column can have its own Lance encoding: compression, compression level,
-byte stream split, run-length encoding and structural encoding. The table
-stores default options, and each new column gets them. You can also set
-options for named columns.
-
-## Usage
-
-Write a stream of nd record batches, then read a projection back as a stream:
+## Rust
 
 ```rust
 use futures::{StreamExt, stream};
-use lance_nd::{ColumnOptions, Compression, WriteOptions, scan, write};
-
-let options = WriteOptions {
-    column_defaults: Some(
-        ColumnOptions::default().with_compression(Compression::Zstd { level: Some(3) }),
-    ),
-    ..WriteOptions::default()
-};
+use lance_nd::{WriteOptions, scan, write};
 
 // `batches` is an iterator of nd_arrow_array::NdRecordBatch.
 let rows = stream::iter(batches.map(Ok));
-let table = write("data/arrays.lance", rows, &options).await?;
+let table = write("data/arrays.lance", rows, &WriteOptions::default()).await?;
 
-// Read two arrays of one row. Each item is one NdRecordBatch.
 let mut rows = scan(&table)
-    .project(&["temperature", "x"])
+    .project(&["temperature"])
     .filter("__global_attrs__.id = 'a'")
     .try_into_stream()
     .await?;
 while let Some(batch) = rows.next().await {
-    let batch = batch?;
-    println!("{:?}", batch.target());
+    println!("{:?}", batch?.target());
 }
 ```
 
-The main functions:
-
-| Function | Purpose |
-|---|---|
-| `open(uri)` | Open a table. Fails with `InvalidTable` for a table without the lance-nd format key of this release. |
-| `open_with(uri, &storage_options)` | Open a table on an object store, see [Object stores](#object-stores). |
-| `write(uri, rows, &options)` | Create, append to or overwrite a table from a stream of nd record batches, in one commit. |
-| `append(&mut table, rows, &options)` | Append a stream of nd record batches to the latest version of a table, in one commit. |
-| `NdWriter::create` and `NdWriter::append` | Write nd record batches in several calls, then commit all of them in one version with `finish`. `write_batch` takes rows that are already encoded. |
-| `scan(&table)` | Read nd record batches as a stream, with `project`, `filter`, `filter_expr`, `lance_filter` and `limit`. |
-| `variables(&table)` | List the array columns of the table. |
-| `column_defaults` and `set_column_defaults` | Read and change the encoding defaults for new columns. |
-| `delete` and `delete_expr` | Delete the rows that match an exact predicate. |
-| `compact` and `cleanup_old_versions` | Merge small fragments, split large fragments, remove deleted rows and free disk space. |
-| `versions`, `checkout` and `restore` | List the versions of a table, read an earlier version, or make an earlier version the latest in a new commit. |
-
-lance-nd logs with [tracing](https://crates.io/crates/tracing). Each write,
-commit, delete, compaction, widen and restore has a span with the table
-uri. Install a subscriber in your application to see them, for example
-`tracing_subscriber::fmt::init()`.
-
-`project` takes whole variables, such as `temperature`, not nested fields
-such as `temperature.attrs.units`. Each row keeps all of its global
-attributes. An empty projection reads only the global attributes, one row
-without arrays for each table row. A filter can use nested fields, see
-[Filters](#filters).
-
-Rows can be large, so a scan reads Lance batches of at most 256 rows or about
-32 MiB, and it decodes them in parallel. `batch_size`, `batch_size_bytes`,
-`batch_readahead` and `decode_parallelism` change these limits.
-
-`Error` tells the cause: `TableNotFound`, `TableExists`, `InvalidTable`,
-`SchemaMismatch`, or `CommitConflict` with `retryable` when another commit
-changed the table first. After a failed fragment write, each call of the
-`NdWriter` returns `WriterFailed` with the first error.
-
-A write that fails a check, for example a type change, is rejected, and the
-`NdWriter` stays usable. `finish` commits the other rows. A failed fragment
-write makes the writer fail, and `finish` then commits nothing.
-
-An append `NdWriter` adds new variables and attribute keys to the table
-before it writes the first fragment with them, so readers can see new empty
-columns before `finish`. `finish` then commits the new rows only. Lance
-merges this commit with concurrent appends, deletes and compactions.
-
-`NdWriter` buffers rows and writes them as Lance fragments of about 128 MiB
-on disk, with up to 4 fragment writes at the same time. Lance compresses the
-data, so the writer learns the ratio of disk to memory bytes from the
-fragments it wrote. The first fragments use the size in memory, and the
-buffer holds at most 8 times the target in memory. A row is never split.
-Each commit writes the rest of the buffer as a smaller fragment, so use
-`compact` for exact sizes. `WriteOptions::target_fragment_bytes` and
-`WriteOptions::write_parallelism` change these limits. The writer must run
-on a Tokio runtime.
-
-Scans and writes allocate many large buffers. On Windows, the system
-allocator makes them much slower. Set a faster global allocator in your
-application, for example [mimalloc](https://crates.io/crates/mimalloc):
-
-```rust
-#[global_allocator]
-static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
-```
-
-### Object stores
-
-A table can live on S3, Google Cloud Storage or Azure Blob Storage. Turn on
-the cargo feature of the store: `aws`, `gcp` or `azure`. The Python
-package has all three. Give the Lance storage options, for example the
-credentials, in `WriteOptions::storage_options` and in `open_with`:
-
-```rust
-let options: StorageOptions = [("aws_region", "eu-west-1")]
-    .into_iter()
-    .map(|(k, v)| (k.to_string(), v.to_string()))
-    .collect();
-let table = open_with("s3://bucket/arrays.lance", &options).await?;
-```
-
-Without options, Lance reads the credentials from the environment, for
-example `AWS_ACCESS_KEY_ID`. `append` uses the options of its table.
-
-Lance commits on S3 with conditional writes, which AWS S3 supports. Another
-S3 store must reject a put with `If-None-Match: *` when the object exists.
-Otherwise two concurrent commits can overwrite each other.
-
-The tests in `tests/object_store.rs` run against any S3 server, for
-example moto. Set `LANCE_ND_S3_ENDPOINT` and create the bucket
-`lance-nd-test`:
-
-```bash
-moto_server -p 5155 &
-curl -X PUT http://127.0.0.1:5155/lance-nd-test
-LANCE_ND_S3_ENDPOINT=http://127.0.0.1:5155 cargo test --features aws --test object_store
-```
-
-### Delete and compact
-
-Delete rows with an exact predicate on the table columns, then compact the
-table and remove the files of old versions:
-
-```rust
-use std::time::Duration;
-use lance_nd::{CompactOptions, cleanup_old_versions, compact, delete};
-
-let deleted = delete(&mut table, "__global_attrs__.id = 'a'").await?;
-compact(&mut table, &CompactOptions::default()).await?;
-cleanup_old_versions(&table, Duration::from_secs(7 * 24 * 60 * 60)).await?;
-```
-
-- `delete` takes Lance SQL, and `delete_expr` takes a DataFusion `Expr`.
-  Lance gets the predicate with no change. A delete does not use the stats,
-  because a stats filter keeps rows that do not match. A filter on values
-  must be exact, for example `array_has(sst.values, 5.0)`.
-- A delete marks rows in deletion files. It does not rewrite data files.
-- `compact` aims for fragments of 128 MiB on disk. It merges neighboring
-  fragments below half of the target, splits fragments above twice the
-  target, and writes again each fragment with at least 10% deleted rows.
-  Each run of these fragments becomes fragments of about the same size.
-  `CompactOptions` changes these limits.
-- The plan estimates the size of a row from the size of its fragment on
-  disk, so the new sizes are not exact. A second `compact` evens them out.
-  A row is never split. lance-nd holds about one new fragment in memory at
-  a time. The row order stays.
-- Each delete and compaction makes a new table version. The files of old
-  versions stay on disk until `cleanup_old_versions` removes them. A reader
-  that still uses a removed version fails, so keep a margin.
-
-lance-nd writes the compacted fragments itself. Lance reads the arrays of
-an absent variable as null, but it rejects these nulls in a write, so its
-own compaction fails on a lance-nd table.
-
 ## Python
-
-The `lance_nd` Python package writes xarray datasets to a lance-nd table,
-through the [nd-arrow-array](https://pypi.org/project/nd-arrow-array/)
-package. It commits all datasets of one writer in one version. It reads
-the table back as a stream of `nd_arrow_array.NdRecordBatch` objects:
 
 ```python
 import xarray as xr
@@ -430,19 +86,22 @@ for batch in table.scan(project=["sst"], prune="sst.values > 300"):
     ds = batch.to_xarray()
 ```
 
-See [python/README.md](python/README.md) for installation and the encoding
-rules.
+See [python/README.md](python/README.md) to install the package.
+
+## Documentation
+
+The [wiki](https://github.com/robinskil/lance-nd/wiki) explains each part in depth:
+
+- [Table layout](https://github.com/robinskil/lance-nd/wiki/Table-Layout): the data model, columns and schema evolution.
+- [Writing](https://github.com/robinskil/lance-nd/wiki/Writing): `NdWriter`, errors, fragments, casting and column encoding.
+- [Reading and filters](https://github.com/robinskil/lance-nd/wiki/Reading-and-Filters): stats, pruning and filters.
+- [Object stores](https://github.com/robinskil/lance-nd/wiki/Object-Stores): S3, Google Cloud Storage and Azure.
+- [Delete, compact and versions](https://github.com/robinskil/lance-nd/wiki/Maintenance).
+- [Python](https://github.com/robinskil/lance-nd/wiki/Python): the full Python API and the encoding rules.
+
+[FORMAT.md](FORMAT.md) is the specification of the lance-nd table.
 
 ## Status
 
-lance-nd is experimental. Version 1 stores and reads rows. It has no indexes.
-
-All public items are at the crate root. A table is a `lance::Dataset`, and
-filters use the DataFusion of Lance, `lance_nd::datafusion`. So a new major
-version of Lance is a breaking change of lance-nd. The release workflow
-checks each new version against the last published one with
-`cargo-semver-checks`.
-
-- [FORMAT.md](FORMAT.md) is the specification of the lance-nd table.
-- The [nd-arrow FORMAT.md](https://github.com/robinskil/nd-arrow-array/blob/main/FORMAT.md)
-  is the specification of the nd-arrow encoding.
+lance-nd is experimental. It has no indexes. A table is a `lance::Dataset`,
+so a new major version of Lance is a breaking change of lance-nd.

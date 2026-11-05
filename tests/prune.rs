@@ -2,8 +2,8 @@ use arrow::datatypes::{DataType, Field, Fields, Schema};
 use lance::deps::datafusion::common::Column;
 use lance::deps::datafusion::functions::core::expr_fn::{get_field, get_field_path};
 use lance::deps::datafusion::logical_expr::{Expr, col, lit};
-use lance_nd::prune::prune_filter;
-use lance_nd::stats::stats_column;
+use lance_nd::prune_filter;
+use lance_nd::stats_column;
 
 fn bounds(data_type: DataType) -> DataType {
     DataType::Struct(Fields::from(vec![

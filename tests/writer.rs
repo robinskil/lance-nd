@@ -5,8 +5,8 @@ use arrow::datatypes::{DataType, Field, Schema};
 use futures::TryStreamExt;
 use futures::stream;
 use lance::Dataset;
-use lance_nd::encode::encode_rows;
-use lance_nd::stats::has_stats;
+use lance_nd::encode_rows;
+use lance_nd::has_stats;
 use lance_nd::{Error, NdWriter, WriteMode, WriteOptions, scan, variables, write};
 use nd_arrow_array::{Attributes, Dimensions, NdArrowArray, NdRecordBatch};
 
@@ -755,7 +755,7 @@ async fn variable_name_with_a_colon() {
     let dataset = write_one_by_one(&uri(&dir), vec![station_var("TEMP:qc")], &options).await;
     assert!(dataset.schema().field("__stats__:TEMP:qc").is_some());
     assert_eq!(
-        lance_nd::stats::stats_variable("__stats__:TEMP:qc"),
+        lance_nd::stats_variable("__stats__:TEMP:qc"),
         Some("TEMP:qc")
     );
     let values = lance_nd::datafusion::functions::core::expr_fn::get_field(

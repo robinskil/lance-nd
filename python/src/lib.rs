@@ -16,8 +16,8 @@ use lance::Dataset;
 use lance_datafusion::planner::Planner;
 use lance_nd::datafusion::common::DFSchema;
 use lance_nd::datafusion::prelude::{SessionConfig, SessionContext};
-use lance_nd::encode::encode_rows;
-use lance_nd::stats::has_stats;
+use lance_nd::encode_rows;
+use lance_nd::has_stats;
 use lance_nd::{
     ByteStreamSplit, Casting, ColumnOptions, CompactOptions, Compression, NdWriter,
     StructuralEncoding, WriteMode, WriteOptions, scan, variables,

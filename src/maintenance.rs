@@ -16,9 +16,7 @@ use arrow::datatypes::{Schema, SchemaRef};
 use arrow::error::ArrowError;
 use futures::TryStreamExt;
 use lance::Dataset;
-use lance::dataset::cleanup::RemovalStats;
 use lance::dataset::fragment::write::FragmentCreateBuilder;
-use lance::dataset::optimize::CompactionMetrics;
 use lance::dataset::transaction::{Operation, RewriteGroup, Transaction};
 use lance::dataset::write::delete::DeleteBuilder;
 use lance::dataset::{CommitBuilder, WriteMode, WriteParams};
@@ -62,6 +60,28 @@ async fn run_delete(dataset: &mut Dataset, builder: DeleteBuilder) -> Result<u64
     Ok(result.num_deleted_rows)
 }
 
+/// What a [`compact`] changed.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CompactionStats {
+    /// Fragments that the compaction replaced.
+    pub fragments_removed: usize,
+    /// New fragments.
+    pub fragments_added: usize,
+    /// Data and deletion files that the new version no longer uses.
+    pub files_removed: usize,
+    /// New data files.
+    pub files_added: usize,
+}
+
+/// What a [`cleanup_old_versions`] removed.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CleanupStats {
+    /// The bytes of the removed files.
+    pub bytes_removed: u64,
+    /// The number of removed versions.
+    pub old_versions: u64,
+}
+
 /// Options for [`compact`].
 #[derive(Debug, Clone)]
 pub struct CompactOptions {
@@ -94,7 +114,7 @@ impl Default for CompactOptions {
 /// fragment in memory at a time. Without work to do, the table keeps its
 /// version.
 #[tracing::instrument(skip_all, fields(uri = %dataset.uri()), err)]
-pub async fn compact(dataset: &mut Dataset, options: &CompactOptions) -> Result<CompactionMetrics> {
+pub async fn compact(dataset: &mut Dataset, options: &CompactOptions) -> Result<CompactionStats> {
     check_format(dataset)?;
     let fragments: Vec<Fragment> = dataset.fragments().as_ref().clone();
     let mut pieces = Vec::with_capacity(fragments.len());
@@ -103,7 +123,7 @@ pub async fn compact(dataset: &mut Dataset, options: &CompactOptions) -> Result<
     }
     let target = options.target_fragment_bytes.max(1);
     let tasks = plan(&pieces, target, options.deleted_fraction);
-    let mut metrics = CompactionMetrics::default();
+    let mut metrics = CompactionStats::default();
     if tasks.is_empty() {
         return Ok(metrics);
     }
@@ -404,9 +424,13 @@ fn holds(held: &HashSet<i32>, field: &lance_core::datatypes::Field) -> bool {
 /// A reader that still uses a removed version fails, so keep a margin for
 /// long scans.
 #[tracing::instrument(skip_all, fields(uri = %dataset.uri(), older_than = ?older_than), err)]
-pub async fn cleanup_old_versions(dataset: &Dataset, older_than: Duration) -> Result<RemovalStats> {
+pub async fn cleanup_old_versions(dataset: &Dataset, older_than: Duration) -> Result<CleanupStats> {
     let older_than = chrono::Duration::from_std(older_than).unwrap_or(chrono::Duration::MAX);
-    Ok(dataset.cleanup_old_versions(older_than, None, None).await?)
+    let removed = dataset.cleanup_old_versions(older_than, None, None).await?;
+    Ok(CleanupStats {
+        bytes_removed: removed.bytes_removed,
+        old_versions: removed.old_versions,
+    })
 }
 
 #[cfg(test)]

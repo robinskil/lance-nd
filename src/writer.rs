@@ -10,7 +10,7 @@ use futures::{FutureExt, Stream};
 use lance::Dataset;
 use lance::dataset::fragment::write::FragmentCreateBuilder;
 use lance::dataset::transaction::{Operation, Transaction};
-use lance::dataset::{CommitBuilder, NewColumnTransform, WriteMode, WriteParams};
+use lance::dataset::{CommitBuilder, NewColumnTransform, WriteMode as LanceWriteMode, WriteParams};
 use lance::table::format::Fragment;
 use lance_core::datatypes::{OnMissing, OnTypeMismatch, Schema as LanceSchema};
 use nd_arrow_array::NdRecordBatch;
@@ -26,7 +26,8 @@ use crate::stats::{STATS_PREFIX, is_stats_name};
 use crate::store::{StorageOptions, open_dataset, store_params};
 use crate::widen::{promotions, widen};
 use crate::write::{
-    FILE_VERSION, WriteOptions, next_group, prepare_batch, table_defaults, table_has_stats,
+    FILE_VERSION, WriteMode, WriteOptions, next_group, prepare_batch, table_defaults,
+    table_has_stats,
 };
 
 /// A writer that makes all its rows visible in one commit.
@@ -162,7 +163,7 @@ impl NdWriter {
     /// Write the rows of an encoded record batch, without a commit.
     ///
     /// `batch` holds nd columns and an optional `__global_attrs__` column,
-    /// as [`crate::encode::encode_rows`] gives them. The writer checks the
+    /// as [`crate::encode_rows`] gives them. The writer checks the
     /// columns, but it does not decode the rows. A batch that fails a check
     /// is rejected as a whole, and the writer stays usable. A failed
     /// fragment write makes the writer fail.
@@ -305,7 +306,7 @@ impl NdWriter {
         let store_params = store_params(&self.options.storage_options);
         let task = tokio::spawn(async move {
             let params = WriteParams {
-                mode: WriteMode::Append,
+                mode: LanceWriteMode::Append,
                 data_storage_version: Some(FILE_VERSION),
                 store_params,
                 ..Default::default()

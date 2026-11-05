@@ -263,3 +263,183 @@ fn is_nan_at(values: &dyn Array, i: usize) -> bool {
         _ => false,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use arrow::array::{
+        Array, ArrayRef, AsArray, BooleanArray, Float64Array, Int32Array, StringArray,
+        TimestampNanosecondArray,
+    };
+    use arrow::datatypes::{Float64Type, Int32Type, TimeUnit};
+    use nd_arrow_array::{Dimensions, NdArrowArray, NdRecordBatch};
+
+    use super::*;
+    use crate::encode::encode_rows;
+
+    fn row(variables: Vec<(&str, ArrayRef)>) -> NdRecordBatch {
+        let fields: Vec<Field> = variables
+            .iter()
+            .map(|(name, array)| Field::new(*name, array.data_type().clone(), true))
+            .collect();
+        let arrays = variables
+            .into_iter()
+            .map(|(name, array)| {
+                let dims = Dimensions::try_new([(format!("{name}_dim"), array.len())]).unwrap();
+                NdArrowArray::try_new(array, dims).unwrap()
+            })
+            .collect();
+        NdRecordBatch::try_new_inferred(Arc::new(Schema::new(fields)), arrays).unwrap()
+    }
+
+    fn stats_of(rows: &[NdRecordBatch]) -> RecordBatch {
+        add_stats(&encode_rows(rows).unwrap()).unwrap()
+    }
+
+    fn child<'a>(batch: &'a RecordBatch, variable: &str) -> &'a StructArray {
+        batch
+            .column_by_name(&stats_column(variable))
+            .expect("a stats column")
+            .as_struct()
+    }
+
+    /// The names of the stats columns of `schema`.
+    fn stats_names(schema: &Schema) -> Vec<String> {
+        schema
+            .fields()
+            .iter()
+            .map(|f| f.name().clone())
+            .filter(|name| is_stats_name(name))
+            .collect()
+    }
+
+    fn min_max(child: &StructArray) -> (&ArrayRef, &ArrayRef) {
+        (
+            child.column_by_name("min").unwrap(),
+            child.column_by_name("max").unwrap(),
+        )
+    }
+
+    #[test]
+    fn min_max_per_row() {
+        let batch = stats_of(&[
+            row(vec![
+                (
+                    "lat",
+                    Arc::new(Float64Array::from(vec![-90.0, -89.0, -88.0])),
+                ),
+                (
+                    "sst",
+                    Arc::new(Float64Array::from(vec![Some(5.0), None, Some(1.0)])),
+                ),
+            ]),
+            row(vec![
+                ("lat", Arc::new(Float64Array::from(vec![11.0, 10.0]))),
+                ("sst", Arc::new(Float64Array::from(vec![None, Some(7.0)]))),
+            ]),
+        ]);
+        let (min, max) = min_max(child(&batch, "lat"));
+        assert_eq!(min.as_primitive::<Float64Type>().values(), &[-90.0, 10.0]);
+        assert_eq!(max.as_primitive::<Float64Type>().values(), &[-88.0, 11.0]);
+        let (min, max) = min_max(child(&batch, "sst"));
+        assert_eq!(min.as_primitive::<Float64Type>().values(), &[1.0, 7.0]);
+        assert_eq!(max.as_primitive::<Float64Type>().values(), &[5.0, 7.0]);
+        assert!(has_stats(batch.schema().as_ref()));
+    }
+
+    #[test]
+    fn nan_and_all_null() {
+        let batch = stats_of(&[
+            row(vec![(
+                "v",
+                Arc::new(Float64Array::from(vec![f64::NAN, 2.0, f64::NAN])),
+            )]),
+            row(vec![(
+                "v",
+                Arc::new(Float64Array::from(vec![Some(f64::NAN), None])),
+            )]),
+        ]);
+        let stats = child(&batch, "v");
+        assert!(stats.is_valid(0) && stats.is_valid(1));
+        let (min, max) = min_max(stats);
+        assert_eq!(min.as_primitive::<Float64Type>().value(0), 2.0);
+        assert_eq!(max.as_primitive::<Float64Type>().value(0), 2.0);
+        assert!(min.is_null(1) && max.is_null(1));
+    }
+
+    #[test]
+    fn negative_nan_and_large_rows() {
+        let mut big: Vec<Option<f64>> = (0..10_000).map(|i| Some(i as f64)).collect();
+        big[17] = Some(-f64::NAN);
+        big[18] = None;
+        let batch = stats_of(&[
+            row(vec![(
+                "v",
+                Arc::new(Float64Array::from(vec![-f64::NAN, 1.0, 2.0])),
+            )]),
+            row(vec![("v", Arc::new(Float64Array::from(big)))]),
+        ]);
+        let (min, max) = min_max(child(&batch, "v"));
+        assert_eq!(min.as_primitive::<Float64Type>().values(), &[1.0, 0.0]);
+        assert_eq!(max.as_primitive::<Float64Type>().values(), &[2.0, 9999.0]);
+    }
+
+    #[test]
+    fn absent_variable_is_null_child() {
+        let batch = stats_of(&[
+            row(vec![(
+                "pressure",
+                Arc::new(Int32Array::from(vec![3, 1, 2])),
+            )]),
+            row(vec![("other", Arc::new(Int32Array::from(vec![0])))]),
+        ]);
+        let stats = child(&batch, "pressure");
+        assert!(stats.is_valid(0) && stats.is_null(1));
+        let (min, max) = min_max(stats);
+        assert_eq!(min.as_primitive::<Int32Type>().value(0), 1);
+        assert_eq!(max.as_primitive::<Int32Type>().value(0), 3);
+    }
+
+    #[test]
+    fn strings_and_timestamps() {
+        let times = TimestampNanosecondArray::from(vec![30, 10, 20]).with_timezone("UTC");
+        let batch = stats_of(&[row(vec![
+            ("name", Arc::new(StringArray::from(vec!["b", "a", "c"]))),
+            ("time", Arc::new(times)),
+        ])]);
+        let (min, max) = min_max(child(&batch, "name"));
+        assert_eq!(min.as_string::<i32>().value(0), "a");
+        assert_eq!(max.as_string::<i32>().value(0), "c");
+        let (min, max) = min_max(child(&batch, "time"));
+        assert_eq!(
+            min.data_type(),
+            &DataType::Timestamp(TimeUnit::Nanosecond, Some("UTC".into()))
+        );
+        assert_eq!(
+            min.as_primitive::<arrow::datatypes::TimestampNanosecondType>()
+                .value(0),
+            10
+        );
+        assert_eq!(
+            max.as_primitive::<arrow::datatypes::TimestampNanosecondType>()
+                .value(0),
+            30
+        );
+    }
+
+    #[test]
+    fn other_types_get_no_child() {
+        let batch = stats_of(&[row(vec![
+            ("flag", Arc::new(BooleanArray::from(vec![true, false]))),
+            ("v", Arc::new(Int32Array::from(vec![1]))),
+        ])]);
+        assert_eq!(stats_names(&batch.schema()), ["__stats__:v"]);
+        assert_eq!(stats_column("v"), format!("{STATS_PREFIX}:v"));
+
+        let only_flags = stats_of(&[row(vec![(
+            "flag",
+            Arc::new(BooleanArray::from(vec![true])),
+        )])]);
+        assert!(stats_names(&only_flags.schema()).is_empty());
+        assert!(has_stats(only_flags.schema().as_ref()));
+    }
+}

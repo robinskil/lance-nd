@@ -7,7 +7,6 @@ use arrow::array::RecordBatch;
 use arrow::datatypes::Schema;
 use futures::{Stream, StreamExt};
 use lance::Dataset;
-use lance::dataset::WriteMode;
 use lance_file::version::LanceFileVersion;
 use nd_arrow_array::NdRecordBatch;
 
@@ -23,6 +22,18 @@ use crate::writer::{NdWriter, open_existing};
 /// Lance file version for new tables. Version 2.2 can add nested fields,
 /// which new attribute keys need.
 pub(crate) const FILE_VERSION: LanceFileVersion = LanceFileVersion::V2_2;
+
+/// How a write treats the table at its uri.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum WriteMode {
+    /// Create a new table. Fails when a table exists.
+    #[default]
+    Create,
+    /// Append to the table. [`write()`] creates it when it does not exist.
+    Append,
+    /// Replace the table, or create it when it does not exist.
+    Overwrite,
+}
 
 /// Options for [`write()`] and [`append()`].
 #[derive(Debug, Clone)]
@@ -41,7 +52,7 @@ pub struct WriteOptions {
     /// Encoding options per column name, over the defaults. They apply when
     /// this write adds the column. Lance keeps them for later appends.
     pub column_options: HashMap<String, ColumnOptions>,
-    /// Store the min and max of each variable per row, see [`crate::stats`].
+    /// Store the min and max of each variable per row, see `FORMAT.md` section 7.
     /// Only a new table or an overwrite reads it. An append writes stats
     /// when the table has them.
     pub stats: bool,
@@ -58,7 +69,7 @@ pub struct WriteOptions {
     /// The most fragments that [`crate::NdWriter`] writes at the same time.
     pub write_parallelism: usize,
     /// Lance storage options, for example the credentials of an object
-    /// store, see [`crate::store`]. [`append()`] uses the options of its
+    /// store, see [`crate::StorageOptions`]. [`append()`] uses the options of its
     /// table when this is empty.
     pub storage_options: StorageOptions,
 }

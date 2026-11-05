@@ -14,7 +14,7 @@ use arrow::array::{
 };
 use arrow::buffer::{NullBuffer, OffsetBuffer};
 use arrow::datatypes::{DataType, Field, Fields, Schema};
-use lance_nd::encode::RowDecoder;
+use lance_nd::RowDecoder;
 use libfuzzer_sys::fuzz_target;
 
 #[derive(Arbitrary, Debug)]

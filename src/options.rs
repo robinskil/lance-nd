@@ -29,10 +29,10 @@ const KEYS: [&str; 5] = [
 ];
 
 /// The prefix of Lance encoding keys in field metadata.
-pub const LANCE_ENCODING_PREFIX: &str = "lance-encoding:";
+pub(crate) const LANCE_ENCODING_PREFIX: &str = "lance-encoding:";
 
 /// The prefix of the table schema metadata keys that hold the column defaults.
-pub const COLUMN_DEFAULTS_PREFIX: &str = "lance_nd.column_defaults.";
+pub(crate) const COLUMN_DEFAULTS_PREFIX: &str = "lance_nd.column_defaults.";
 
 /// The general compression of the values of a column.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -107,7 +107,7 @@ impl ColumnOptions {
     }
 
     /// The options of `self`, with the options of `defaults` where `self` has none.
-    pub fn or(&self, defaults: &ColumnOptions) -> ColumnOptions {
+    pub(crate) fn or(&self, defaults: &ColumnOptions) -> ColumnOptions {
         ColumnOptions {
             compression: self.compression.or(defaults.compression),
             byte_stream_split: self.byte_stream_split.or(defaults.byte_stream_split),
@@ -117,7 +117,7 @@ impl ColumnOptions {
     }
 
     /// The Lance metadata for the leaf fields of a column.
-    pub fn leaf_metadata(&self) -> HashMap<String, String> {
+    pub(crate) fn leaf_metadata(&self) -> HashMap<String, String> {
         let mut metadata = HashMap::new();
         match self.compression {
             Some(Compression::None) => insert(&mut metadata, COMPRESSION_KEY, "none"),
@@ -145,7 +145,7 @@ impl ColumnOptions {
     }
 
     /// The Lance metadata for the top-level field of a column.
-    pub fn root_metadata(&self) -> HashMap<String, String> {
+    pub(crate) fn root_metadata(&self) -> HashMap<String, String> {
         let mut metadata = HashMap::new();
         let encoding = self.structural_encoding.map(|encoding| match encoding {
             StructuralEncoding::MiniBlock => "miniblock",
@@ -158,7 +158,7 @@ impl ColumnOptions {
     }
 
     /// The options as table schema metadata, see [`COLUMN_DEFAULTS_PREFIX`].
-    pub fn to_table_metadata(&self) -> HashMap<String, String> {
+    pub(crate) fn to_table_metadata(&self) -> HashMap<String, String> {
         self.leaf_metadata()
             .into_iter()
             .chain(self.root_metadata())
@@ -167,7 +167,7 @@ impl ColumnOptions {
     }
 
     /// Read the options from table schema metadata. Other keys are ignored.
-    pub fn from_table_metadata(metadata: &HashMap<String, String>) -> Result<Self> {
+    pub(crate) fn from_table_metadata(metadata: &HashMap<String, String>) -> Result<Self> {
         let get = |key: &str| metadata.get(&format!("{COLUMN_DEFAULTS_PREFIX}{key}"));
         let invalid = |key: &str, value: &str| {
             Error::InvalidTable(format!(
@@ -241,7 +241,7 @@ pub async fn set_column_defaults(dataset: &mut Dataset, defaults: &ColumnOptions
 
 /// `schema` with the encoding metadata of each column. The options of a
 /// column are its entry in `columns`, then `defaults`.
-pub fn with_column_options(
+pub(crate) fn with_column_options(
     schema: &Schema,
     defaults: &ColumnOptions,
     columns: &HashMap<String, ColumnOptions>,
@@ -285,7 +285,7 @@ fn with_leaf_metadata(field: &Field, leaf: &HashMap<String, String>) -> Field {
 }
 
 /// `field` without the Lance encoding keys, also in nested fields.
-pub fn without_encoding_metadata(field: &Field) -> Field {
+pub(crate) fn without_encoding_metadata(field: &Field) -> Field {
     let data_type = match field.data_type() {
         DataType::Struct(children) => DataType::Struct(
             children

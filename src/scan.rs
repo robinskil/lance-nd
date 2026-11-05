@@ -95,7 +95,7 @@ impl NdScanner<'_> {
     /// `expr` is a DataFusion filter on the table columns, for example
     /// `get_field(col("lat"), "values").between(lit(17.5), lit(25.4))`. A
     /// part on `<variable>.values` uses the stats of the table, see
-    /// [`crate::prune`]. A kept row comes back whole, also with values
+    /// [`crate::prune_filter`]. A kept row comes back whole, also with values
     /// outside the filter. A table without stats keeps all rows for a value
     /// part. Each other part, for example on attributes, filters the rows
     /// exactly.

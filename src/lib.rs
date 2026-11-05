@@ -5,53 +5,60 @@
 //! column. Each row is one [`NdRecordBatch`](nd_arrow_array::NdRecordBatch),
 //! a complete one or a chunk of a larger one.
 //!
-//! - [`open()`]: open a table and check its format version.
-//! - [`store`]: storage options for S3, Google Cloud Storage and Azure.
-//! - [`versions()`], [`checkout()`] and [`restore()`]: read and restore earlier versions.
+//! - [`open()`] and [`open_with()`]: open a table and check its format
+//!   version. [`StorageOptions`] hold the credentials of S3, Google Cloud
+//!   Storage or Azure.
 //! - [`write()`] and [`append()`]: write a stream of nd record batches.
 //! - [`NdWriter`]: write in several calls and commit once.
-//! - [`scan()`]: read a stream of nd record batches, with a projection.
+//! - [`scan()`]: read a stream of nd record batches, with a projection and
+//!   filters. [`prune_filter()`] shows how a filter on values uses the stats.
 //! - [`delete()`], [`compact()`] and [`cleanup_old_versions()`]: delete rows and
-//!   reclaim space, see [`maintenance`].
-//! - [`prune`]: change a DataFusion filter on values and attributes into a filter on the stats.
-//! - [`stats`]: opt-in min and max values per variable and row, for pruning.
+//!   reclaim space.
+//! - [`versions()`], [`checkout()`] and [`restore()`]: read and restore earlier versions.
+//! - [`widen()`]: change the value type of a variable.
 //! - [`ColumnOptions`]: Lance encoding options, like the compression, per column.
+//! - [`encode_rows()`] and [`RowDecoder`]: the row encoding, for record
+//!   batches that you write or read yourself.
 //!
 //! See `FORMAT.md` for the table layout.
 
 #![warn(missing_docs)]
 
-pub mod cast;
-pub mod encode;
-pub mod error;
-pub mod format;
-pub mod maintenance;
-pub mod options;
-pub mod prune;
-pub mod scan;
-pub mod schema;
-pub mod stats;
-pub mod store;
-pub mod versions;
-pub mod widen;
-pub mod write;
-pub mod writer;
+mod cast;
+mod encode;
+mod error;
+mod format;
+mod maintenance;
+mod options;
+mod prune;
+mod scan;
+mod schema;
+mod stats;
+mod store;
+mod versions;
+mod widen;
+mod write;
+mod writer;
 
 pub use cast::Casting;
+pub use encode::{RowDecoder, encode_rows};
 pub use error::{Error, Result};
 pub use format::{FORMAT_VERSION, check_format, open, open_with};
-pub use lance::dataset::WriteMode;
-pub use lance::dataset::cleanup::RemovalStats;
-pub use lance::dataset::optimize::CompactionMetrics;
+/// The DataFusion version of Lance, to build filters.
 pub use lance::deps::datafusion;
-pub use maintenance::{CompactOptions, cleanup_old_versions, compact, delete, delete_expr};
+pub use maintenance::{
+    CleanupStats, CompactOptions, CompactionStats, cleanup_old_versions, compact, delete,
+    delete_expr,
+};
 pub use options::{
     ByteStreamSplit, ColumnOptions, Compression, StructuralEncoding, column_defaults,
     set_column_defaults,
 };
+pub use prune::prune_filter;
 pub use scan::{NdScanner, scan, variables};
+pub use stats::{STATS_PREFIX, has_stats, stats_column, stats_variable};
 pub use store::StorageOptions;
 pub use versions::{TableVersion, checkout, restore, versions};
 pub use widen::widen;
-pub use write::{WriteOptions, append, write};
+pub use write::{WriteMode, WriteOptions, append, write};
 pub use writer::NdWriter;

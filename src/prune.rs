@@ -30,9 +30,26 @@ use crate::error::Result;
 use crate::stats::stats_column;
 
 /// A filter for a scan of `table` with the rows that can match `expr`.
+/// `None` means that every row is kept. [`crate::NdScanner::filter_expr`]
+/// uses it.
 ///
-/// See the [module](self) documentation for the forms. `None` means that
-/// every row is kept.
+/// `expr` uses the Lance table columns, for example
+/// `get_field(col("sst"), "values")`, `get_field(col("sst"), "attrs")` or
+/// `get_field(col("__global_attrs__"), "id")`. lance-nd does not check or
+/// change the names, so Lance reports a wrong name in the scan.
+///
+/// A value part reads `<variable>.values`. It changes into a filter on the
+/// stats column. The changed part keeps every row that can match, and skips
+/// a row only when the stats show that no value of the row matches. A value
+/// part without a stats form keeps every row.
+///
+/// Each other part, for example on attributes, is exact for a row, so it
+/// stays as it is. These rules apply:
+///
+/// - `AND`: a side without a stats form goes away, so more rows are kept.
+/// - `OR`: both sides need a form, or the full `OR` keeps every row.
+/// - `NOT`: only over parts without values. Over a value part, it keeps
+///   every row.
 pub fn prune_filter(expr: &Expr, table: &Schema) -> Result<Option<Expr>> {
     let value_type = |name: &str| {
         let stats = table.field_with_name(&stats_column(name)).ok()?;

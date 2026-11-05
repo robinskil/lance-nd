@@ -12,7 +12,12 @@ use lance::Dataset;
 use lance::dataset::builder::DatasetBuilder;
 use lance::io::{ObjectStoreParams, StorageOptionsAccessor};
 
-/// Lance storage options, by key.
+/// Lance storage options, by key, for tables on object stores.
+///
+/// The keys are the Lance storage options, for example `aws_region`,
+/// `aws_endpoint` or `allow_http`. An empty map uses the defaults of the
+/// environment. Each object store needs its cargo feature: `aws`, `gcp` or
+/// `azure`.
 pub type StorageOptions = HashMap<String, String>;
 
 /// The object store parameters for `options`, or `None` for the defaults.

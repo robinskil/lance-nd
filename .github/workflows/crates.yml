@@ -15,8 +15,29 @@ jobs:
   ci:
     uses: ./.github/workflows/ci.yml
 
-  publish:
+  semver:
     needs: ci
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: protoc@3.${{ env.PROTOC_VERSION }}
+      - id: published
+        run: |
+          if curl -sf -A "lance-nd release workflow" https://crates.io/api/v1/crates/lance-nd > /dev/null; then
+            echo "found=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "found=false" >> "$GITHUB_OUTPUT"
+          fi
+      # The first release has no published version to compare with.
+      - if: steps.published.outputs.found == 'true'
+        uses: obi1kenobi/cargo-semver-checks-action@v2
+        with:
+          package: lance-nd
+
+  publish:
+    needs: [ci, semver]
     runs-on: ubuntu-24.04
     environment: crates-io
     permissions:

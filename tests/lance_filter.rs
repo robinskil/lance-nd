@@ -11,7 +11,7 @@ use lance::Dataset;
 use lance_nd::datafusion::common::ScalarValue;
 use lance_nd::datafusion::functions::core::expr_fn::{get_field, get_field_path};
 use lance_nd::datafusion::logical_expr::{Expr, col, lit};
-use lance_nd::prune::prune_filter;
+use lance_nd::prune_filter;
 use lance_nd::{Error, NdScanner, NdWriter, WriteOptions, scan};
 use nd_arrow_array::{Attributes, Dimensions, NdArrowArray, NdRecordBatch};
 

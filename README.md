@@ -436,6 +436,12 @@ rules.
 
 lance-nd is experimental. Version 1 stores and reads rows. It has no indexes.
 
+All public items are at the crate root. A table is a `lance::Dataset`, and
+filters use the DataFusion of Lance, `lance_nd::datafusion`. So a new major
+version of Lance is a breaking change of lance-nd. The release workflow
+checks each new version against the last published one with
+`cargo-semver-checks`.
+
 - [FORMAT.md](FORMAT.md) is the specification of the lance-nd table.
 - The [nd-arrow FORMAT.md](https://github.com/robinskil/nd-arrow-array/blob/main/FORMAT.md)
   is the specification of the nd-arrow encoding.

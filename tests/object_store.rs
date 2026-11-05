@@ -199,9 +199,13 @@ async fn concurrent_writers_on_s3() {
     first.write(rows(vec![sst(2, "b")])).await.unwrap();
     second.write(rows(vec![sst(2, "c")])).await.unwrap();
     let (first, second) = tokio::join!(first.finish(), second.finish());
-    first.unwrap();
-    let after = second.unwrap();
-    assert_eq!(after.version().version, version + 2);
+    // Either writer can commit first. Each gets its own new version.
+    let mut versions = [
+        first.unwrap().version().version,
+        second.unwrap().version().version,
+    ];
+    versions.sort();
+    assert_eq!(versions, [version + 1, version + 2]);
 
     // A writer from before a widen fails and adds no rows.
     let mut stale = NdWriter::append(&uri, &options).await.unwrap();

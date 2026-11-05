@@ -5,6 +5,7 @@ edition = "2024"
 rust-version = "1.91.0"
 description = "N-dimensional datasets stored in Lance, one dataset or chunk per row"
 license = "Apache-2.0"
+documentation = "https://docs.rs/lance-nd"
 
 [workspace]
 members = [".", "python"]

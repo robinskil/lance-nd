@@ -1,5 +1,10 @@
 # lance_nd for Python
 
+[![PyPI](https://img.shields.io/pypi/v/lance_nd)](https://pypi.org/project/lance_nd/)
+[![CI](https://github.com/robinskil/lance-nd/actions/workflows/ci.yml/badge.svg)](https://github.com/robinskil/lance-nd/actions/workflows/ci.yml)
+[![Status: experimental](https://img.shields.io/badge/status-experimental-orange)](https://github.com/robinskil/lance-nd)
+[![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue)](https://github.com/robinskil/lance-nd/blob/main/LICENSE)
+
 Store xarray datasets as N-dimensional Arrow arrays in a
 [lance-nd](https://github.com/robinskil/lance-nd) table.
 

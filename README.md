@@ -11,7 +11,10 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/status-experimental-orange" alt="Status: experimental">
-  <img src="https://img.shields.io/badge/version-0.1.0-blue" alt="Version 0.1.0">
+  <a href="https://crates.io/crates/lance-nd"><img src="https://img.shields.io/crates/v/lance-nd" alt="crates.io"></a>
+  <a href="https://docs.rs/lance-nd"><img src="https://img.shields.io/docsrs/lance-nd" alt="docs.rs"></a>
+  <a href="https://pypi.org/project/lance_nd/"><img src="https://img.shields.io/pypi/v/lance_nd" alt="PyPI"></a>
+  <a href="https://github.com/robinskil/lance-nd/actions/workflows/ci.yml"><img src="https://github.com/robinskil/lance-nd/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue" alt="License: Apache-2.0"></a>
   <img src="https://img.shields.io/badge/rust-1.91%2B-orange?logo=rust" alt="Rust 1.91+">
   <img src="https://img.shields.io/badge/lance-11-1E3A8A" alt="Lance 11">

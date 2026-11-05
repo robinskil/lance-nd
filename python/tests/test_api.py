@@ -356,3 +356,17 @@ def test_casting_promote_widens_the_table(table_uri):
     table = lance_nd.open(table_uri)
     assert sst_types(table) == ["double"] * 3
     assert titles(table.scan(prune="sst.values > 2")) == ["a", "b", "c"]
+
+
+def test_error_classes(table_uri, tmp_path):
+    missing = str(tmp_path / "missing.lance")
+    with pytest.raises(lance_nd.TableNotFoundError):
+        lance_nd.open(missing)
+    with pytest.raises(lance_nd.TableNotFoundError):
+        lance_nd.append(missing)
+    with lance_nd.create(table_uri) as writer:
+        writer.write(dataset("a"))
+    with pytest.raises(lance_nd.TableExistsError):
+        lance_nd.create(table_uri)
+    # Each class is a LanceNdError.
+    assert issubclass(lance_nd.CommitConflictError, LanceNdError)

@@ -10,6 +10,21 @@ from lance_nd._typing import Casting, ColumnOptions, Mode
 class LanceNdError(Exception):
     """An error from lance-nd or Lance."""
 
+class TableNotFoundError(LanceNdError):
+    """No table exists at the uri."""
+
+class TableExistsError(LanceNdError):
+    """A table exists at the uri."""
+
+class InvalidTableError(LanceNdError):
+    """The table is not a lance-nd table of this format version."""
+
+class SchemaMismatchError(LanceNdError):
+    """A variable or attribute does not match the table schema."""
+
+class CommitConflictError(LanceNdError):
+    """Another commit changed the table first."""
+
 class Writer:
     """A writer that makes all its datasets visible in one commit at ``finish()``."""
 

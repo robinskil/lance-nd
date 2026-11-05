@@ -13,6 +13,7 @@ use nd_arrow_array::NdRecordBatch;
 
 use crate::cast::{Casting, cast_to};
 use crate::error::{Error, Result};
+use crate::format::add_format;
 use crate::options::{ColumnOptions, column_defaults, with_column_options};
 use crate::schema::conform_batch;
 use crate::stats::{add_stats, has_stats};
@@ -164,6 +165,7 @@ pub(crate) fn prepare_batch(
     }
     let mut metadata = batch.schema().metadata().clone();
     metadata.extend(defaults.to_table_metadata());
+    add_format(&mut metadata);
     let schema = with_column_options(&batch.schema(), defaults, &options.column_options)
         .with_metadata(metadata);
     conform_batch(&batch, &Arc::new(schema))

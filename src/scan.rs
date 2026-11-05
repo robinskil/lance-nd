@@ -13,11 +13,13 @@ use nd_arrow_array::extension::GLOBAL_ATTRIBUTES_FIELD;
 
 use crate::encode::{RowDecoder, variable_field};
 use crate::error::{Error, Result};
+use crate::format::check_format;
 use crate::prune::prune_filter;
 use crate::stats::is_stats_name;
 
 /// The variables of the table, as logical fields typed by their values.
 pub fn variables(dataset: &Dataset) -> Result<Vec<Field>> {
+    check_format(dataset)?;
     Schema::from(dataset.schema())
         .fields()
         .iter()
@@ -187,6 +189,7 @@ impl NdScanner<'_> {
 
     /// The Lance scanner, and `true` when it reads only row ids.
     fn lance_scanner(&self) -> Result<(Scanner, bool)> {
+        check_format(self.dataset)?;
         let mut scanner = self.dataset.scan();
         scanner.batch_size(self.batch_size);
         scanner.batch_size_bytes(self.batch_size_bytes);

@@ -165,8 +165,7 @@ older fragments without the variable. In Lance SQL, the column name needs
 backticks: `` `__stats__:sst`.max ``.
 
 `lance_nd::datafusion` is the DataFusion version of Lance. Use it to build
-filters. A table from an earlier lance-nd release, with one `__stats__`
-struct, reads as a table without stats. Write it again to get stats.
+filters.
 
 ### Pruning
 
@@ -284,6 +283,7 @@ The main functions:
 
 | Function | Purpose |
 |---|---|
+| `open(uri)` | Open a table. Fails with `InvalidTable` for a table without the lance-nd format key of this release. |
 | `write(uri, rows, &options)` | Create, append to or overwrite a table from a stream of nd record batches, in one commit. |
 | `append(&mut table, rows, &options)` | Append a stream of nd record batches to the latest version of a table, in one commit. |
 | `NdWriter::create` and `NdWriter::append` | Write nd record batches in several calls, then commit all of them in one version with `finish`. `write_batch` takes rows that are already encoded. |
@@ -302,6 +302,11 @@ without arrays for each table row. A filter can use nested fields, see
 Rows can be large, so a scan reads Lance batches of at most 256 rows or about
 32 MiB, and it decodes them in parallel. `batch_size`, `batch_size_bytes`,
 `batch_readahead` and `decode_parallelism` change these limits.
+
+`Error` tells the cause: `TableNotFound`, `TableExists`, `InvalidTable`,
+`SchemaMismatch`, or `CommitConflict` with `retryable` when another commit
+changed the table first. After a failed fragment write, each call of the
+`NdWriter` returns `WriterFailed` with the first error.
 
 A write that fails a check, for example a type change, is rejected, and the
 `NdWriter` stays usable. `finish` commits the other rows. A failed fragment

@@ -33,16 +33,15 @@ pub const STATS_PREFIX: &str = "__stats__";
 /// The table schema metadata key that marks a table with stats.
 pub const STATS_METADATA_KEY: &str = "lance_nd:stats";
 
-/// The value of [`STATS_METADATA_KEY`] for the layout with one stats column
-/// per variable.
-const STATS_LAYOUT: &str = "2";
+/// The value of [`STATS_METADATA_KEY`] in a table with stats.
+const STATS_ON: &str = "true";
 
 /// `true` when the schema marks a table with stats.
 pub fn has_stats(schema: &Schema) -> bool {
     schema
         .metadata()
         .get(STATS_METADATA_KEY)
-        .is_some_and(|value| value == STATS_LAYOUT)
+        .is_some_and(|value| value == STATS_ON)
 }
 
 /// The name of the stats column of `variable`.
@@ -113,7 +112,7 @@ pub fn add_stats(batch: &RecordBatch) -> Result<RecordBatch> {
     }
 
     let mut metadata = batch.schema().metadata().clone();
-    metadata.insert(STATS_METADATA_KEY.to_string(), STATS_LAYOUT.to_string());
+    metadata.insert(STATS_METADATA_KEY.to_string(), STATS_ON.to_string());
     let schema = Schema::new_with_metadata(fields, metadata);
     Ok(RecordBatch::try_new(Arc::new(schema), columns)?)
 }

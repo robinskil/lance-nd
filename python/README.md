@@ -77,7 +77,10 @@ Rules:
   then commits nothing.
 - If another writer adds variables to the table before your `finish()`, and
   your writer also adds variables, `finish()` raises an error.
-- Errors from Rust raise `lance_nd.LanceNdError`.
+- Errors from Rust raise `lance_nd.LanceNdError` or one of its subclasses:
+  `TableNotFoundError`, `TableExistsError`, `InvalidTableError` (not a
+  lance-nd table of this format version), `SchemaMismatchError` and
+  `CommitConflictError`.
 
 ### Chunked datasets
 
@@ -136,9 +139,7 @@ lance_nd.create(
 `create(uri, stats=True)` stores the min and the max of each variable per
 row, in one column `__stats__:<variable>` for each variable. A scan with
 `prune` uses them to skip rows. An append follows the table.
-`Table.has_stats` tells if a table stores stats. A table from an earlier
-lance-nd release reads as a table without stats; write it again to get
-stats. Each variable name that starts with `__stats__` is reserved.
+`Table.has_stats` tells if a table stores stats. Each variable name that starts with `__stats__` is reserved.
 
 ### Read
 

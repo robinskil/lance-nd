@@ -293,7 +293,7 @@ async fn create_existing_fails() {
     table_with_one_row(&uri).await;
     assert!(matches!(
         NdWriter::create(&uri, &WriteOptions::default()).await,
-        Err(Error::InvalidArgument(_))
+        Err(Error::TableExists(_))
     ));
 }
 
@@ -302,7 +302,7 @@ async fn append_missing_fails() {
     let dir = tempfile::tempdir().unwrap();
     assert!(matches!(
         NdWriter::append(&uri(&dir), &WriteOptions::default()).await,
-        Err(Error::InvalidArgument(_))
+        Err(Error::TableNotFound(_))
     ));
 }
 
@@ -384,10 +384,7 @@ async fn create_fails_when_another_writer_created_the_table() {
         .unwrap();
     second.write(rows(vec![sst(2, "c")])).await.unwrap();
     second.finish().await.unwrap();
-    assert!(matches!(
-        first.finish().await,
-        Err(Error::InvalidArgument(_))
-    ));
+    assert!(matches!(first.finish().await, Err(Error::TableExists(_))));
     let dataset = Dataset::open(&uri).await.unwrap();
     assert_eq!(dataset.version().version, 1);
     assert_eq!(dataset.count_rows(None).await.unwrap(), 1);
@@ -817,4 +814,24 @@ async fn fragment_target_learns_the_size_on_disk() {
     let fragments = dataset.get_fragments().len();
     assert!((2..=30).contains(&fragments), "{fragments} fragments");
     assert_eq!(dataset.count_rows(None).await.unwrap(), 200);
+}
+
+#[tokio::test]
+async fn a_dropped_writer_stops_its_writes_and_commits_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let uri = uri(&dir);
+    let before = table_with_one_row(&uri).await;
+    // Each row is a fragment write, and all of them can run at once.
+    let options = WriteOptions {
+        target_fragment_bytes: 1,
+        write_parallelism: 64,
+        ..Default::default()
+    };
+    let mut writer = NdWriter::append(&uri, &options).await.unwrap();
+    let many: Vec<NdRecordBatch> = (0..20).map(|i| sst(i + 2, "x")).collect();
+    writer.write(rows(many)).await.unwrap();
+    drop(writer);
+    let dataset = Dataset::open(&uri).await.unwrap();
+    assert_eq!(dataset.version().version, before.version().version);
+    assert_eq!(dataset.count_rows(None).await.unwrap(), 1);
 }

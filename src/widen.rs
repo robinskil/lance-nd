@@ -19,6 +19,7 @@ use nd_arrow_array::extension::{VALUES_FIELD, is_nd_field};
 
 use crate::cast::{Casting, allowed, promote_type};
 use crate::error::{Error, Result};
+use crate::format::check_format;
 use crate::schema::fill_hidden_nulls;
 use crate::stats::stats_column;
 
@@ -33,6 +34,7 @@ const TEMPORARY_PREFIX: &str = "__widen__";
 /// variable again, so a concurrent commit that adds rows makes it start
 /// again, up to a limit.
 pub async fn widen(dataset: &mut Dataset, variable: &str, to: &DataType) -> Result<()> {
+    check_format(dataset)?;
     let schema = Schema::from(dataset.schema());
     let field = schema
         .field_with_name(variable)
@@ -125,10 +127,9 @@ const MAX_ATTEMPTS: usize = 10;
 async fn rewrite(dataset: &mut Dataset, columns: &[(Field, Field)]) -> Result<()> {
     for attempt in 1..=MAX_ATTEMPTS {
         match rewrite_once(dataset, columns).await {
-            Err(Error::Lance(error))
-                if matches!(*error, lance::Error::RetryableCommitConflict { .. })
-                    && attempt < MAX_ATTEMPTS =>
-            {
+            Err(Error::CommitConflict {
+                retryable: true, ..
+            }) if attempt < MAX_ATTEMPTS => {
                 dataset.checkout_latest().await?;
             }
             result => return result,

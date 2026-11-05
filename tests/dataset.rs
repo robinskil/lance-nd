@@ -645,3 +645,41 @@ async fn projection_takes_whole_variables() {
     let message = error.unwrap().to_string();
     assert!(message.contains("whole"), "{message}");
 }
+
+#[tokio::test]
+async fn a_table_has_the_format_key() {
+    let dir = tempfile::tempdir().unwrap();
+    let options = WriteOptions::default();
+    write(&uri(&dir), rows(vec![stations(vec![1.0])]), &options)
+        .await
+        .unwrap();
+    let dataset = lance_nd::open(&uri(&dir)).await.unwrap();
+    let format = dataset.schema().metadata.get("lance_nd:format");
+    assert_eq!(format.map(String::as_str), Some(lance_nd::FORMAT_VERSION));
+}
+
+#[tokio::test]
+async fn a_table_without_the_format_key_is_rejected() {
+    let dir = tempfile::tempdir().unwrap();
+    let schema = Arc::new(Schema::new(vec![Field::new("x", DataType::Int32, true)]));
+    let batch = arrow::array::RecordBatch::try_new(
+        schema.clone(),
+        vec![Arc::new(Int32Array::from(vec![1]))],
+    )
+    .unwrap();
+    let reader = arrow::array::RecordBatchIterator::new([Ok(batch)], schema);
+    let mut dataset = Dataset::write(reader, &uri(&dir), None).await.unwrap();
+
+    let invalid = |result: Result<_, Error>| matches!(result, Err(Error::InvalidTable(_)));
+    assert!(invalid(lance_nd::open(&uri(&dir)).await.map(|_| ())));
+    assert!(invalid(scan(&dataset).try_collect().await.map(|_| ())));
+    assert!(invalid(variables(&dataset).map(|_| ())));
+    assert!(invalid(
+        lance_nd::NdWriter::append(&uri(&dir), &WriteOptions::default())
+            .await
+            .map(|_| ())
+    ));
+    assert!(invalid(
+        lance_nd::delete(&mut dataset, "x = 1").await.map(|_| ())
+    ));
+}

@@ -27,6 +27,7 @@ use lance::table::format::Fragment;
 use lance_core::datatypes::Schema as LanceSchema;
 
 use crate::error::Result;
+use crate::format::check_format;
 use crate::schema::{conform_batch, fill_hidden_nulls};
 use crate::write::FILE_VERSION;
 
@@ -36,6 +37,7 @@ use crate::write::FILE_VERSION;
 /// for example `__global_attrs__.id = 'a'` or `sst.attrs.units = 'K'`.
 /// Returns the number of deleted rows.
 pub async fn delete(dataset: &mut Dataset, predicate: &str) -> Result<u64> {
+    check_format(dataset)?;
     let builder = DeleteBuilder::new(Arc::new(dataset.clone()), predicate);
     run_delete(dataset, builder).await
 }
@@ -47,6 +49,7 @@ pub async fn delete(dataset: &mut Dataset, predicate: &str) -> Result<u64> {
 /// a delete does not change value parts into stats filters, because a stats
 /// filter keeps rows that do not match. Returns the number of deleted rows.
 pub async fn delete_expr(dataset: &mut Dataset, expr: Expr) -> Result<u64> {
+    check_format(dataset)?;
     let builder = DeleteBuilder::from_expr(Arc::new(dataset.clone()), expr);
     run_delete(dataset, builder).await
 }
@@ -89,6 +92,7 @@ impl Default for CompactOptions {
 /// fragment in memory at a time. Without work to do, the table keeps its
 /// version.
 pub async fn compact(dataset: &mut Dataset, options: &CompactOptions) -> Result<CompactionMetrics> {
+    check_format(dataset)?;
     let fragments: Vec<Fragment> = dataset.fragments().as_ref().clone();
     let mut pieces = Vec::with_capacity(fragments.len());
     for fragment in &fragments {
@@ -271,6 +275,8 @@ async fn rewrite(
     let count = outputs(bytes as u64, rows, target);
     // Cut at each multiple of the mean part size, so the parts come out even.
     let part_bytes = bytes / count as f64;
+    // Float sums miss an exact cut by a tiny amount, which would add a row.
+    let slack = part_bytes * 1e-9;
     let mut cuts = 1;
     let mut written = 0.0;
     let mut pending: Vec<RecordBatch> = Vec::new();
@@ -287,7 +293,7 @@ async fn rewrite(
             let mut batch = writer.conform(&batch)?;
             while batch.num_rows() > 0 {
                 let take = if cuts < count {
-                    let left = part_bytes * cuts as f64 - written;
+                    let left = part_bytes * cuts as f64 - written - slack;
                     ((left / row_bytes).ceil() as usize).clamp(1, batch.num_rows())
                 } else {
                     batch.num_rows()
@@ -295,7 +301,7 @@ async fn rewrite(
                 pending.push(batch.slice(0, take));
                 written += row_bytes * take as f64;
                 batch = batch.slice(take, batch.num_rows() - take);
-                if cuts < count && written >= part_bytes * cuts as f64 {
+                if cuts < count && written + slack >= part_bytes * cuts as f64 {
                     new_fragments.extend(writer.write(&std::mem::take(&mut pending)).await?);
                     cuts += 1;
                 }

@@ -19,6 +19,7 @@ use tokio::task::JoinHandle;
 use crate::cast::Casting;
 use crate::encode::{RowDecoder, encode_rows};
 use crate::error::{Error, Result};
+use crate::format::check_format;
 use crate::options::ColumnOptions;
 use crate::schema::{concat_conformed, holds_schema, merge_schemas, missing_fields, used_fields};
 use crate::stats::{STATS_PREFIX, is_stats_name};
@@ -42,8 +43,8 @@ use crate::write::{
 /// fragment with them, so readers can see new empty columns before
 /// [`NdWriter::finish`]. `finish` then commits a plain append.
 ///
-/// A writer that is aborted or dropped commits nothing. Its data files stay
-/// until a Lance cleanup removes them. One exception: under
+/// A writer that is aborted or dropped commits nothing, and stops its
+/// fragment writes. Its data files stay until a Lance cleanup removes them. One exception: under
 /// [`Casting::Promote`], a write that widens the table first commits the
 /// rows written before it.
 pub struct NdWriter {
@@ -68,7 +69,7 @@ pub struct NdWriter {
     /// The bytes in memory and on disk of the fragments written so far.
     written: DiskRatio,
     /// The error of a failed fragment write. `finish` then fails too.
-    failed: Option<String>,
+    failed: Option<Arc<Error>>,
 }
 
 impl NdWriter {
@@ -81,7 +82,7 @@ impl NdWriter {
         let existing = open_existing(uri).await?;
         let overwrite = match options.mode {
             WriteMode::Create if existing.is_some() => {
-                return Err(Error::InvalidArgument(format!("a table exists at {uri}")));
+                return Err(Error::TableExists(uri.to_string()));
             }
             WriteMode::Create => false,
             WriteMode::Overwrite => true,
@@ -113,7 +114,8 @@ impl NdWriter {
     pub async fn append(uri: &str, options: &WriteOptions) -> Result<Self> {
         let dataset = open_existing(uri)
             .await?
-            .ok_or_else(|| Error::InvalidArgument(format!("no table at {uri}")))?;
+            .ok_or_else(|| Error::TableNotFound(uri.to_string()))?;
+        check_format(&dataset)?;
         let defaults = table_defaults(&dataset, options)?;
         let stats = table_has_stats(&dataset);
         let schema = (Schema::from(dataset.schema()), dataset.schema().clone());
@@ -168,18 +170,17 @@ impl NdWriter {
 
     fn check(&self) -> Result<()> {
         match &self.failed {
-            Some(error) => Err(Error::InvalidArgument(format!(
-                "an earlier write failed: {error}"
-            ))),
+            Some(error) => Err(Error::WriterFailed(error.clone())),
             None => Ok(()),
         }
     }
 
     fn fail_on(&mut self, result: Result<()>) -> Result<()> {
-        if let Err(error) = &result {
-            self.failed = Some(error.to_string());
-        }
-        result
+        result.map_err(|error| {
+            let error = Arc::new(error);
+            self.failed = Some(error.clone());
+            Error::WriterFailed(error)
+        })
     }
 
     async fn write_encoded(&mut self, batch: RecordBatch) -> Result<()> {
@@ -352,9 +353,7 @@ impl NdWriter {
         let Some((task, memory)) = self.pending.pop_front() else {
             return Ok(());
         };
-        let fragments = task.await.map_err(|error| {
-            Error::InvalidArgument(format!("a fragment write failed: {error}"))
-        })??;
+        let fragments = task.await??;
         self.written.add(memory, &fragments);
         self.fragments.extend(fragments);
         Ok(())
@@ -374,9 +373,7 @@ impl NdWriter {
     /// the table unchanged.
     pub async fn finish(mut self) -> Result<Dataset> {
         if let Some(error) = &self.failed {
-            return Err(Error::InvalidArgument(format!(
-                "an earlier write failed, nothing is committed: {error}"
-            )));
+            return Err(Error::WriterFailed(error.clone()));
         }
         self.commit().await
     }
@@ -401,10 +398,7 @@ impl NdWriter {
             (None, overwrite) => {
                 // Another writer can create the table after `create`.
                 if !overwrite && open_existing(&self.uri).await?.is_some() {
-                    return Err(Error::InvalidArgument(format!(
-                        "a table exists at {}",
-                        self.uri
-                    )));
+                    return Err(Error::TableExists(self.uri.clone()));
                 }
                 let operation = overwrite_operation(numbered(fragments, 0), schema);
                 CommitBuilder::new(self.uri.as_str())
@@ -450,8 +444,13 @@ impl NdWriter {
     }
 
     /// Drop all written rows without a commit. Stops the fragment writes
-    /// that run.
-    pub fn abort(self) {
+    /// that run. A drop of the writer does the same.
+    pub fn abort(self) {}
+}
+
+impl Drop for NdWriter {
+    /// Stop the fragment writes that run. Their rows are never committed.
+    fn drop(&mut self) {
         for (task, _) in &self.pending {
             task.abort();
         }

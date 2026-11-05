@@ -40,8 +40,9 @@ Rules:
    only add nullable columns to an existing table, so a writer makes it
    nullable. A null row has no global attributes.
 6. The column order has no meaning.
-7. The table schema metadata holds the column defaults, see section 6,
-   and the stats marker, see section 7. Other keys have no meaning. The field metadata of an array column comes
+7. The table schema metadata holds the format version, see section 8, the
+   column defaults, see section 6, and the stats marker, see section 7.
+   Other keys have no meaning. The field metadata of an array column comes
    from the first row with that array.
 
 ## 3. Grid
@@ -93,7 +94,7 @@ that it returns.
 ## 7. Stats
 
 Stats are optional. A table with stats has the table schema metadata key
-`lance_nd:stats = 2`. Each variable with stats has one stats column:
+`lance_nd:stats = true`. Each variable with stats has one stats column:
 
 | Column | Type | Nullable |
 |---|---|---|
@@ -125,5 +126,9 @@ name. The variable is the part after the first `:`, so a variable name can
 hold `:` itself. In Lance SQL, the name needs backticks:
 `` `__stats__:sst`.max > 300 ``.
 
-A table with the key value `true` uses an earlier layout with one
-`__stats__` struct. lance-nd reads it as a table without stats.
+## 8. Format version
+
+The table schema metadata key `lance_nd:format` holds the format version of
+the table. This document specifies version `1`. A writer sets the key when
+it creates or overwrites a table. A reader rejects a table without the key,
+or with another version. A change of this format gets a new version.

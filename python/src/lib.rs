@@ -30,6 +30,11 @@ use pyo3::types::PyDict;
 use tokio::runtime::Runtime;
 
 create_exception!(_lance_nd, LanceNdError, PyException);
+create_exception!(_lance_nd, TableNotFoundError, LanceNdError);
+create_exception!(_lance_nd, TableExistsError, LanceNdError);
+create_exception!(_lance_nd, InvalidTableError, LanceNdError);
+create_exception!(_lance_nd, SchemaMismatchError, LanceNdError);
+create_exception!(_lance_nd, CommitConflictError, LanceNdError);
 
 fn runtime() -> &'static Runtime {
     static RUNTIME: OnceLock<Runtime> = OnceLock::new();
@@ -37,7 +42,20 @@ fn runtime() -> &'static Runtime {
 }
 
 fn to_py(error: lance_nd::Error) -> PyErr {
-    LanceNdError::new_err(error.to_string())
+    let message = error.to_string();
+    // A failed writer raises the class of the error that made it fail.
+    let mut cause = &error;
+    while let lance_nd::Error::WriterFailed(inner) = cause {
+        cause = inner;
+    }
+    match cause {
+        lance_nd::Error::TableNotFound(_) => TableNotFoundError::new_err(message),
+        lance_nd::Error::TableExists(_) => TableExistsError::new_err(message),
+        lance_nd::Error::InvalidTable(_) => InvalidTableError::new_err(message),
+        lance_nd::Error::SchemaMismatch(_) => SchemaMismatchError::new_err(message),
+        lance_nd::Error::CommitConflict { .. } => CommitConflictError::new_err(message),
+        _ => LanceNdError::new_err(message),
+    }
 }
 
 fn closed() -> PyErr {
@@ -192,8 +210,7 @@ impl Table {
     /// Open the table at `uri`.
     #[staticmethod]
     fn open(py: Python<'_>, uri: String) -> PyResult<Self> {
-        let dataset = block_on(py, Dataset::open(&uri))
-            .map_err(|error| to_py(lance_nd::Error::from(error)))?;
+        let dataset = block_on(py, lance_nd::open(&uri)).map_err(to_py)?;
         Ok(Self { dataset, uri })
     }
 
@@ -511,6 +528,20 @@ fn invalid(key: &str, value: &str, expected: &str) -> PyErr {
 #[pymodule]
 fn _lance_nd(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("LanceNdError", m.py().get_type::<LanceNdError>())?;
+    m.add(
+        "TableNotFoundError",
+        m.py().get_type::<TableNotFoundError>(),
+    )?;
+    m.add("TableExistsError", m.py().get_type::<TableExistsError>())?;
+    m.add("InvalidTableError", m.py().get_type::<InvalidTableError>())?;
+    m.add(
+        "SchemaMismatchError",
+        m.py().get_type::<SchemaMismatchError>(),
+    )?;
+    m.add(
+        "CommitConflictError",
+        m.py().get_type::<CommitConflictError>(),
+    )?;
     m.add_class::<Writer>()?;
     m.add_class::<Table>()?;
     m.add_class::<Scanner>()?;

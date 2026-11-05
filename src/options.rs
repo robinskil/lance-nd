@@ -12,6 +12,7 @@ use arrow::datatypes::{DataType, Field, Schema};
 use lance::Dataset;
 
 use crate::error::{Error, Result};
+use crate::format::check_format;
 
 // The keys of `lance_encoding::constants`.
 const COMPRESSION_KEY: &str = "lance-encoding:compression";
@@ -217,11 +218,13 @@ fn insert(metadata: &mut HashMap<String, String>, key: &str, value: &str) {
 
 /// The column defaults of the table. New columns get them.
 pub fn column_defaults(dataset: &Dataset) -> Result<ColumnOptions> {
+    check_format(dataset)?;
     ColumnOptions::from_table_metadata(&dataset.schema().metadata)
 }
 
 /// Replace the column defaults of the table. Existing columns keep their encoding.
 pub async fn set_column_defaults(dataset: &mut Dataset, defaults: &ColumnOptions) -> Result<()> {
+    check_format(dataset)?;
     let mut values = defaults.to_table_metadata();
     let entries: Vec<(String, Option<String>)> = KEYS
         .iter()

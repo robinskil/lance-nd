@@ -5,6 +5,7 @@
 //! column. Each row is one [`NdRecordBatch`](nd_arrow_array::NdRecordBatch),
 //! a complete one or a chunk of a larger one.
 //!
+//! - [`open()`]: open a table and check its format version.
 //! - [`write()`] and [`append()`]: write a stream of nd record batches.
 //! - [`NdWriter`]: write in several calls and commit once.
 //! - [`scan()`]: read a stream of nd record batches, with a projection.
@@ -21,6 +22,7 @@
 pub mod cast;
 pub mod encode;
 pub mod error;
+pub mod format;
 pub mod maintenance;
 pub mod options;
 pub mod prune;
@@ -33,6 +35,7 @@ pub mod writer;
 
 pub use cast::Casting;
 pub use error::{Error, Result};
+pub use format::{FORMAT_VERSION, check_format, open};
 pub use lance::dataset::WriteMode;
 pub use lance::dataset::cleanup::RemovalStats;
 pub use lance::dataset::optimize::CompactionMetrics;

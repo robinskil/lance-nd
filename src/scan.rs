@@ -161,6 +161,7 @@ impl NdScanner<'_> {
     }
 
     /// A stream of the selected rows, in table order.
+    #[tracing::instrument(level = "debug", skip_all, fields(uri = %self.dataset.uri()), err)]
     pub async fn try_into_stream(self) -> Result<BoxStream<'static, Result<NdRecordBatch>>> {
         let (scanner, rows_only) = self.lance_scanner()?;
         let parallelism = self

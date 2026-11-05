@@ -223,6 +223,7 @@ pub fn column_defaults(dataset: &Dataset) -> Result<ColumnOptions> {
 }
 
 /// Replace the column defaults of the table. Existing columns keep their encoding.
+#[tracing::instrument(skip_all, fields(uri = %dataset.uri()), err)]
 pub async fn set_column_defaults(dataset: &mut Dataset, defaults: &ColumnOptions) -> Result<()> {
     check_format(dataset)?;
     let mut values = defaults.to_table_metadata();

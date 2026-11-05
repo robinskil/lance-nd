@@ -683,3 +683,28 @@ async fn a_table_without_the_format_key_is_rejected() {
         lance_nd::delete(&mut dataset, "x = 1").await.map(|_| ())
     ));
 }
+
+#[tokio::test]
+async fn read_and_restore_an_earlier_version() {
+    let dir = tempfile::tempdir().unwrap();
+    let options = WriteOptions::default();
+    let mut dataset = write(&uri(&dir), rows(vec![stations(vec![1.0])]), &options)
+        .await
+        .unwrap();
+    append(&mut dataset, rows(vec![stations(vec![2.0])]), &options)
+        .await
+        .unwrap();
+    let history = lance_nd::versions(&dataset).await.unwrap();
+    let numbers: Vec<u64> = history.iter().map(|v| v.version).collect();
+    assert_eq!(numbers, [1, 2]);
+    assert!(history[0].timestamp <= history[1].timestamp);
+
+    let first = lance_nd::checkout(&dataset, 1).await.unwrap();
+    assert_eq!(scan(&first).try_collect().await.unwrap().len(), 1);
+
+    lance_nd::restore(&mut dataset, 1).await.unwrap();
+    assert_eq!(dataset.version().version, 3);
+    assert_eq!(scan(&dataset).try_collect().await.unwrap().len(), 1);
+    let latest = lance_nd::open(&uri(&dir)).await.unwrap();
+    assert_eq!(latest.version().version, 3);
+}

@@ -86,6 +86,7 @@ impl Default for WriteOptions {
 /// `WriteMode::Append` creates the table when it does not exist. A failed
 /// row commits nothing. Fails when the stream has no rows and the table
 /// does not exist.
+#[tracing::instrument(skip_all, fields(uri = %uri, mode = ?options.mode), err)]
 pub async fn write(
     uri: &str,
     rows: impl Stream<Item = Result<NdRecordBatch>>,
@@ -116,6 +117,7 @@ pub async fn write(
 ///
 /// The append starts from the latest version of the table. `dataset` then
 /// holds the new version.
+#[tracing::instrument(skip_all, fields(uri = %dataset.uri()), err)]
 pub async fn append(
     dataset: &mut Dataset,
     rows: impl Stream<Item = Result<NdRecordBatch>>,

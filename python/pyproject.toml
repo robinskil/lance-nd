@@ -6,9 +6,28 @@ build-backend = "maturin"
 name = "lance_nd"
 version = "0.1.0"
 description = "Store xarray datasets as N-dimensional Arrow arrays in Lance"
+readme = "README.md"
 license = { text = "Apache-2.0" }
 requires-python = ">=3.10"
-dependencies = ["numpy", "pyarrow", "xarray"]
+dependencies = ["numpy>=1.24", "pyarrow>=14", "xarray>=2023.1"]
+keywords = ["arrow", "lance", "xarray", "netcdf", "n-dimensional"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: MacOS",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Rust",
+    "Topic :: Scientific/Engineering",
+    "Typing :: Typed",
+]
+
+[project.urls]
+Homepage = "https://github.com/robinskil/lance-nd"
+Repository = "https://github.com/robinskil/lance-nd"
+Issues = "https://github.com/robinskil/lance-nd/issues"
 
 [project.optional-dependencies]
 dev = ["cftime", "dask", "mypy", "pandas-stubs", "pytest"]

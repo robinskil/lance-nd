@@ -33,6 +33,7 @@ const TEMPORARY_PREFIX: &str = "__widen__";
 /// same type does nothing. A widen is one Lance commit. It writes the
 /// variable again, so a concurrent commit that adds rows makes it start
 /// again, up to a limit.
+#[tracing::instrument(skip_all, fields(uri = %dataset.uri(), variable = %variable, to = %to), err)]
 pub async fn widen(dataset: &mut Dataset, variable: &str, to: &DataType) -> Result<()> {
     check_format(dataset)?;
     let schema = Schema::from(dataset.schema());
@@ -130,6 +131,10 @@ async fn rewrite(dataset: &mut Dataset, columns: &[(Field, Field)]) -> Result<()
             Err(Error::CommitConflict {
                 retryable: true, ..
             }) if attempt < MAX_ATTEMPTS => {
+                tracing::debug!(
+                    attempt,
+                    "a concurrent commit preempted the widen, try again"
+                );
                 dataset.checkout_latest().await?;
             }
             result => return result,

@@ -7,6 +7,7 @@
 //!
 //! - [`open()`]: open a table and check its format version.
 //! - [`store`]: storage options for S3, Google Cloud Storage and Azure.
+//! - [`versions()`], [`checkout()`] and [`restore()`]: read and restore earlier versions.
 //! - [`write()`] and [`append()`]: write a stream of nd record batches.
 //! - [`NdWriter`]: write in several calls and commit once.
 //! - [`scan()`]: read a stream of nd record batches, with a projection.
@@ -31,6 +32,7 @@ pub mod scan;
 pub mod schema;
 pub mod stats;
 pub mod store;
+pub mod versions;
 pub mod widen;
 pub mod write;
 pub mod writer;
@@ -49,6 +51,7 @@ pub use options::{
 };
 pub use scan::{NdScanner, scan, variables};
 pub use store::StorageOptions;
+pub use versions::{TableVersion, checkout, restore, versions};
 pub use widen::widen;
 pub use write::{WriteOptions, append, write};
 pub use writer::NdWriter;

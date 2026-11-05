@@ -1,0 +1,24 @@
+[package]
+name = "lance-nd-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+arbitrary = { version = "1", features = ["derive"] }
+arrow = { version = "58", default-features = false }
+lance-nd = { path = ".." }
+libfuzzer-sys = "0.4"
+
+# Not a member of the main workspace.
+[workspace]
+
+[[bin]]
+name = "row_decoder"
+path = "fuzz_targets/row_decoder.rs"
+test = false
+doc = false
+bench = false

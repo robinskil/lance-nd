@@ -128,6 +128,16 @@ class Table:
         stats column again, not the whole table.
         """
 
+    def versions(self) -> list[tuple[int, datetime.datetime]]:
+        """The versions that still have their files, oldest first, as
+        ``(version, timestamp)`` pairs."""
+
+    def checkout(self, version: int) -> Table:
+        """The table at ``version``, to read."""
+
+    def restore(self, version: int) -> None:
+        """Make the content of ``version`` the latest version, in a new commit."""
+
     def delete(self, predicate: str) -> int:
         """Delete the datasets that match ``predicate``, a Lance SQL filter.
 

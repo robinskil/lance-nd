@@ -36,3 +36,9 @@ docs/superpowers/
 
 # Local test data and scripts
 testdata/
+
+# Fuzz output
+fuzz/target/
+fuzz/artifacts/
+fuzz/coverage/
+fuzz/corpus/

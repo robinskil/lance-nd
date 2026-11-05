@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use arrow::array::{RecordBatch, RecordBatchIterator};
 use arrow::datatypes::{Schema, SchemaRef};
-use futures::Stream;
+use futures::{FutureExt, Stream};
 use lance::Dataset;
 use lance::dataset::fragment::write::FragmentCreateBuilder;
 use lance::dataset::transaction::{Operation, Transaction};
@@ -79,6 +79,7 @@ impl NdWriter {
     /// `options.mode` is [`WriteMode::Create`], which fails when the table
     /// exists, or [`WriteMode::Overwrite`], which replaces the table at
     /// [`NdWriter::finish`].
+    #[tracing::instrument(skip_all, fields(uri = %uri, mode = ?options.mode), err)]
     pub async fn create(uri: &str, options: &WriteOptions) -> Result<Self> {
         let existing = open_existing(uri, &options.storage_options).await?;
         let overwrite = match options.mode {
@@ -112,6 +113,7 @@ impl NdWriter {
 
     /// A writer that appends to the table at `uri`. Fails when the table
     /// does not exist. `options.mode` is ignored.
+    #[tracing::instrument(skip_all, fields(uri = %uri), err)]
     pub async fn append(uri: &str, options: &WriteOptions) -> Result<Self> {
         let dataset = open_existing(uri, &options.storage_options)
             .await?
@@ -229,7 +231,7 @@ impl NdWriter {
             }
             let dataset = self.base.as_mut().expect("a committed table");
             for (variable, to) in &widenings {
-                widen(dataset, variable, to).await?;
+                widen(dataset, variable, to).boxed().await?;
             }
             self.schema = Some((Schema::from(dataset.schema()), dataset.schema().clone()));
             Ok(())
@@ -268,7 +270,7 @@ impl NdWriter {
         self.buffered_bytes += batch.get_array_memory_size();
         self.buffer.push(batch);
         if self.written.on_disk(self.buffered_bytes) >= self.options.target_fragment_bytes as f64 {
-            let result = self.flush().await;
+            let result = self.flush().boxed().await;
             return self.fail_on(result);
         }
         Ok(())
@@ -276,6 +278,7 @@ impl NdWriter {
 
     /// Start a fragment write of the buffer. Wait for the oldest write when
     /// too many run.
+    #[tracing::instrument(level = "debug", skip_all, fields(rows = self.buffer.len(), bytes = self.buffered_bytes))]
     async fn flush(&mut self) -> Result<()> {
         if self.buffer.is_empty() {
             return Ok(());
@@ -341,11 +344,12 @@ impl NdWriter {
         }
         // Boxed: the add_columns future is large, and would grow the future
         // of each write beyond the compiler's layout depth.
-        Box::pin(base.add_columns(
+        base.add_columns(
             NewColumnTransform::AllNulls(Arc::new(Schema::new(missing))),
             None,
             None,
-        ))
+        )
+        .boxed()
         .await?;
         self.schema = Some((Schema::from(base.schema()), base.schema().clone()));
         Ok(())
@@ -374,16 +378,20 @@ impl NdWriter {
     ///
     /// Without rows, a new table or an overwrite fails, and an append returns
     /// the table unchanged.
+    #[tracing::instrument(skip_all, fields(uri = %self.uri), err)]
     pub async fn finish(mut self) -> Result<Dataset> {
         if let Some(error) = &self.failed {
             return Err(Error::WriterFailed(error.clone()));
         }
-        self.commit().await
+        // Boxed without its type: the commit future is large, and its full
+        // type would exceed the compiler's layout and Send depth for callers.
+        self.commit().boxed().await
     }
 
     /// Commit the staged rows. The writer then appends to the new version.
+    #[tracing::instrument(level = "debug", skip_all, fields(uri = %self.uri))]
     async fn commit(&mut self) -> Result<Dataset> {
-        self.flush().await?;
+        self.flush().boxed().await?;
         while !self.pending.is_empty() {
             self.wait_oldest().await?;
         }
@@ -423,7 +431,7 @@ impl NdWriter {
             }
             // No new fields: new rows only, which Lance merges with concurrent appends.
             (Some(base), false) if schema.max_field_id() == base.schema().max_field_id() => {
-                commit_rows(base, fragments, &schema).await?
+                commit_rows(base, fragments, &schema).boxed().await?
             }
             (Some(base), false) => {
                 let version = base.version().version;
@@ -445,6 +453,7 @@ impl NdWriter {
                     .await?
             }
         };
+        tracing::info!(version = dataset.version().version, "committed the rows");
         self.base = Some(dataset.clone());
         self.overwrite = false;
         self.schema = Some((Schema::from(dataset.schema()), dataset.schema().clone()));
@@ -512,6 +521,7 @@ const MAX_COMMIT_ATTEMPTS: usize = 10;
 /// concurrent appends, deletes and compactions. A concurrent schema change,
 /// for example a widen, makes Lance reject it. Then the writer checks that
 /// the table still has each field of the fragments, and tries again.
+#[tracing::instrument(level = "debug", skip_all, fields(fragments = fragments.len()))]
 async fn commit_rows(
     mut base: Dataset,
     fragments: Vec<Fragment>,
@@ -537,6 +547,7 @@ async fn commit_rows(
         {
             Ok(dataset) => return Ok(dataset),
             Err(lance::Error::RetryableCommitConflict { .. }) if attempt < MAX_COMMIT_ATTEMPTS => {
+                tracing::debug!(attempt, "a concurrent commit preempted the rows, try again");
                 base.checkout_latest().await?;
             }
             Err(error) => return Err(error.into()),

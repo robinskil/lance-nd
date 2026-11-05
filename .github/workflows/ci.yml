@@ -12,18 +12,20 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  # Each test binary links Lance. With debug info, they fill the runner disk.
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  CARGO_PROFILE_TEST_DEBUG: "0"
   PROTOC_VERSION: "29.3"
 
 jobs:
   lint:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       # Lance needs protoc to build.
-      - uses: arduino/setup-protoc@v3
+      - uses: taiki-e/install-action@v2
         with:
-          version: ${{ env.PROTOC_VERSION }}
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          tool: protoc@3.${{ env.PROTOC_VERSION }}
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -38,11 +40,10 @@ jobs:
         os: [ubuntu-24.04, macos-14, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: arduino/setup-protoc@v3
+      - uses: actions/checkout@v7
+      - uses: taiki-e/install-action@v2
         with:
-          version: ${{ env.PROTOC_VERSION }}
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          tool: protoc@3.${{ env.PROTOC_VERSION }}
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --workspace
@@ -52,14 +53,13 @@ jobs:
     env:
       LANCE_ND_S3_ENDPOINT: http://127.0.0.1:5155
     steps:
-      - uses: actions/checkout@v4
-      - uses: arduino/setup-protoc@v3
+      - uses: actions/checkout@v7
+      - uses: taiki-e/install-action@v2
         with:
-          version: ${{ env.PROTOC_VERSION }}
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          tool: protoc@3.${{ env.PROTOC_VERSION }}
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       - name: Start an S3 server
@@ -74,14 +74,13 @@ jobs:
     env:
       LANCE_ND_S3_ENDPOINT: http://127.0.0.1:5155
     steps:
-      - uses: actions/checkout@v4
-      - uses: arduino/setup-protoc@v3
+      - uses: actions/checkout@v7
+      - uses: taiki-e/install-action@v2
         with:
-          version: ${{ env.PROTOC_VERSION }}
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          tool: protoc@3.${{ env.PROTOC_VERSION }}
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       - name: Start an S3 server

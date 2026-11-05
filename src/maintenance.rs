@@ -36,6 +36,7 @@ use crate::write::FILE_VERSION;
 /// Lance gets `predicate` with no change, so it must be exact for a row,
 /// for example `__global_attrs__.id = 'a'` or `sst.attrs.units = 'K'`.
 /// Returns the number of deleted rows.
+#[tracing::instrument(skip_all, fields(uri = %dataset.uri(), predicate = %predicate), err)]
 pub async fn delete(dataset: &mut Dataset, predicate: &str) -> Result<u64> {
     check_format(dataset)?;
     let builder = DeleteBuilder::new(Arc::new(dataset.clone()), predicate);
@@ -48,6 +49,7 @@ pub async fn delete(dataset: &mut Dataset, predicate: &str) -> Result<u64> {
 /// Lance gets `expr` with no change. Unlike [`crate::NdScanner::filter_expr`],
 /// a delete does not change value parts into stats filters, because a stats
 /// filter keeps rows that do not match. Returns the number of deleted rows.
+#[tracing::instrument(skip_all, fields(uri = %dataset.uri(), predicate = %expr), err)]
 pub async fn delete_expr(dataset: &mut Dataset, expr: Expr) -> Result<u64> {
     check_format(dataset)?;
     let builder = DeleteBuilder::from_expr(Arc::new(dataset.clone()), expr);
@@ -91,6 +93,7 @@ impl Default for CompactOptions {
 /// the target is a fragment on its own. lance-nd holds about one new
 /// fragment in memory at a time. Without work to do, the table keeps its
 /// version.
+#[tracing::instrument(skip_all, fields(uri = %dataset.uri()), err)]
 pub async fn compact(dataset: &mut Dataset, options: &CompactOptions) -> Result<CompactionMetrics> {
     check_format(dataset)?;
     let fragments: Vec<Fragment> = dataset.fragments().as_ref().clone();
@@ -146,6 +149,12 @@ pub async fn compact(dataset: &mut Dataset, options: &CompactOptions) -> Result<
     *dataset = CommitBuilder::new(Arc::new(reserved))
         .execute(Transaction::new(read_version, rewrite, None))
         .await?;
+    tracing::info!(
+        version = dataset.version().version,
+        fragments_removed = metrics.fragments_removed,
+        fragments_added = metrics.fragments_added,
+        "compacted the table"
+    );
     Ok(metrics)
 }
 
@@ -394,6 +403,7 @@ fn holds(held: &HashSet<i32>, field: &lance_core::datatypes::Field) -> bool {
 ///
 /// A reader that still uses a removed version fails, so keep a margin for
 /// long scans.
+#[tracing::instrument(skip_all, fields(uri = %dataset.uri(), older_than = ?older_than), err)]
 pub async fn cleanup_old_versions(dataset: &Dataset, older_than: Duration) -> Result<RemovalStats> {
     let older_than = chrono::Duration::from_std(older_than).unwrap_or(chrono::Duration::MAX);
     Ok(dataset.cleanup_old_versions(older_than, None, None).await?)

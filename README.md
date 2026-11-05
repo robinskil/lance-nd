@@ -293,6 +293,12 @@ The main functions:
 | `column_defaults` and `set_column_defaults` | Read and change the encoding defaults for new columns. |
 | `delete` and `delete_expr` | Delete the rows that match an exact predicate. |
 | `compact` and `cleanup_old_versions` | Merge small fragments, split large fragments, remove deleted rows and free disk space. |
+| `versions`, `checkout` and `restore` | List the versions of a table, read an earlier version, or make an earlier version the latest in a new commit. |
+
+lance-nd logs with [tracing](https://crates.io/crates/tracing). Each write,
+commit, delete, compaction, widen and restore has a span with the table
+uri. Install a subscriber in your application to see them, for example
+`tracing_subscriber::fmt::init()`.
 
 `project` takes whole variables, such as `temperature`, not nested fields
 such as `temperature.attrs.units`. Each row keeps all of its global

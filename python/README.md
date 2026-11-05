@@ -18,14 +18,15 @@ Build the package from this directory with [maturin](https://www.maturin.rs/):
 
 ```bash
 python -m venv .venv
-.venv/Scripts/python -m pip install maturin pytest numpy pyarrow xarray
-.venv/Scripts/python -m maturin develop --release
+.venv/bin/python -m pip install maturin
+.venv/bin/python -m maturin develop --release --extras dev
 ```
+
+On Windows, use `.venv/Scripts/python`. The `dev` extra installs the test
+and type check tools.
 
 Without `--release`, maturin builds the Rust code without optimizations,
 and writes are several times slower.
-
-On Linux and macOS, use `.venv/bin/python`.
 
 ## Usage
 
@@ -60,6 +61,7 @@ table.version, table.count_rows(), table.variables()
 | `Writer.abort()` | Drop all written datasets. |
 | `Table.scan(project=None, filter=None, prune=None, limit=None)` | Read the datasets as a stream of nd-arrow record batches. |
 | `Table.delete(predicate)`, `Table.compact()` and `Table.cleanup_old_versions()` | Delete datasets and free disk space. |
+| `Table.versions()`, `Table.checkout(version)` and `Table.restore(version)` | List the versions, read an earlier version, or make an earlier version the latest in a new commit. |
 
 Rules:
 
@@ -334,7 +336,7 @@ Without options, Lance reads the credentials from the environment.
 ## Tests
 
 ```bash
-.venv/Scripts/python -m pytest tests
+.venv/bin/python -m pytest tests
 ```
 
 `tests/test_s3.py` runs when `LANCE_ND_S3_ENDPOINT` points to an S3 server

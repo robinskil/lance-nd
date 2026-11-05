@@ -25,6 +25,7 @@ pub async fn open(uri: &str) -> Result<Dataset> {
 
 /// Open the lance-nd table at `uri` with Lance storage options, for example
 /// the credentials of an object store. See [`crate::store`].
+#[tracing::instrument(skip_all, fields(uri = %uri), err)]
 pub async fn open_with(uri: &str, options: &StorageOptions) -> Result<Dataset> {
     let dataset = open_dataset(uri, options).await?;
     check_format(&dataset)?;

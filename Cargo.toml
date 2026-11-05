@@ -8,6 +8,7 @@ license = "Apache-2.0"
 
 [workspace]
 members = [".", "python"]
+exclude = ["fuzz"]
 
 [features]
 # Object stores. The local file system needs no feature.
@@ -25,9 +26,11 @@ lance-file = "11"
 nd-arrow-array = { git = "https://github.com/robinskil/nd-arrow-array" }
 thiserror = "2"
 tokio = { version = "1", features = ["rt"] }
+tracing = "0.1"
 
 [dev-dependencies]
 object_store = "0.13"
+proptest = "1"
 serde_json = "1"
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

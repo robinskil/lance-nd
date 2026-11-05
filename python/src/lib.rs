@@ -341,6 +341,30 @@ impl Table {
         block_on(py, lance_nd::widen(&mut self.dataset, &variable, &to.0)).map_err(to_py)
     }
 
+    /// The versions of the table that still have their files, oldest
+    /// first, as `(version, timestamp)` pairs.
+    fn versions(&self, py: Python<'_>) -> PyResult<Vec<(u64, std::time::SystemTime)>> {
+        let versions = block_on(py, lance_nd::versions(&self.dataset)).map_err(to_py)?;
+        Ok(versions
+            .into_iter()
+            .map(|v| (v.version, v.timestamp))
+            .collect())
+    }
+
+    /// The table at `version`, to read.
+    fn checkout(&self, py: Python<'_>, version: u64) -> PyResult<Self> {
+        let dataset = block_on(py, lance_nd::checkout(&self.dataset, version)).map_err(to_py)?;
+        Ok(Self {
+            dataset,
+            uri: self.uri.clone(),
+        })
+    }
+
+    /// Make the content of `version` the latest version, in a new commit.
+    fn restore(&mut self, py: Python<'_>, version: u64) -> PyResult<()> {
+        block_on(py, lance_nd::restore(&mut self.dataset, version)).map_err(to_py)
+    }
+
     /// Delete the datasets that match `predicate`, a Lance SQL filter.
     /// Returns the number of deleted datasets.
     fn delete(&mut self, py: Python<'_>, predicate: String) -> PyResult<u64> {

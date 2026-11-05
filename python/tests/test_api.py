@@ -370,3 +370,18 @@ def test_error_classes(table_uri, tmp_path):
         lance_nd.create(table_uri)
     # Each class is a LanceNdError.
     assert issubclass(lance_nd.CommitConflictError, LanceNdError)
+
+
+def test_versions(table_uri):
+    with lance_nd.create(table_uri) as writer:
+        writer.write(dataset("a"))
+    with lance_nd.append(table_uri) as writer:
+        writer.write(dataset("b"))
+    table = lance_nd.open(table_uri)
+    history = table.versions()
+    assert [version for version, _ in history] == [1, 2]
+    assert history[0][1] <= history[1][1]
+    assert table.checkout(1).count_rows() == 1
+    table.restore(1)
+    assert table.version == 3
+    assert table.count_rows() == 1

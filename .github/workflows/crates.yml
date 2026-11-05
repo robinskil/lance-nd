@@ -8,6 +8,9 @@ on:
 permissions:
   contents: read
 
+env:
+  PROTOC_VERSION: "29.3"
+
 jobs:
   ci:
     uses: ./.github/workflows/ci.yml
@@ -20,12 +23,11 @@ jobs:
       # Trusted publishing gets a short-lived token from this OIDC id.
       id-token: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       # Lance needs protoc to build.
-      - uses: arduino/setup-protoc@v3
+      - uses: taiki-e/install-action@v2
         with:
-          version: "29.3"
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          tool: protoc@3.${{ env.PROTOC_VERSION }}
       - uses: dtolnay/rust-toolchain@stable
       - uses: rust-lang/crates-io-auth-action@v1
         id: auth

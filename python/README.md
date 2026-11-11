@@ -19,6 +19,16 @@ The package does three things:
 
 ## Install
 
+Install the package from [PyPI](https://pypi.org/project/lance_nd/):
+
+```bash
+pip install lance_nd
+```
+
+The package needs Python 3.10 or later.
+
+## Build from source
+
 Build the package from this directory with [maturin](https://www.maturin.rs/):
 
 ```bash
@@ -58,6 +68,8 @@ explains the writer rules, chunks, encoding options, stats, scans, casting,
 object stores and the encoding rules.
 
 ## Tests
+
+Build from source first. Then run the tests:
 
 ```bash
 .venv/bin/python -m pytest tests

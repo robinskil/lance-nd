@@ -10,7 +10,9 @@ readme = "README.md"
 license = { text = "Apache-2.0" }
 requires-python = ">=3.10"
 dependencies = [
+    "h5netcdf>=1.1",
     "nd-arrow-array[arrow,xarray]>=0.5,<0.6",
+    "netCDF4>=1.6",
     "numpy>=1.24",
     "pyarrow>=14",
     "xarray>=2023.1",
@@ -33,6 +35,9 @@ classifiers = [
 Homepage = "https://github.com/robinskil/lance-nd"
 Repository = "https://github.com/robinskil/lance-nd"
 Issues = "https://github.com/robinskil/lance-nd/issues"
+
+[project.scripts]
+lance-nd = "lance_nd.cli:main"
 
 [project.optional-dependencies]
 dev = ["dask", "mypy", "pandas-stubs", "pytest"]

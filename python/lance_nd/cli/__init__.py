@@ -8,7 +8,7 @@ from typing import get_args
 
 from lance_nd._typing import Casting
 from lance_nd.cli import _sync, _write
-from lance_nd.cli._files import FILE_ATTRIBUTE, log
+from lance_nd.cli._files import FILE_ATTRIBUTE, log, skip_hdf5_plugins
 
 __all__ = ["main"]
 
@@ -44,6 +44,11 @@ def _parser() -> argparse.ArgumentParser:
         help="what to do when a type is not the table type (default: no)",
     )
     common.add_argument("--log-file", help="also write the full log to this file")
+    common.add_argument(
+        "--hdf5-plugins",
+        action="store_true",
+        help="load HDF5 filter plugins, for files with zstd, blosc, bzip2 or szip (slower)",
+    )
     level = common.add_mutually_exclusive_group()
     level.add_argument("-v", "--verbose", action="store_true", help="show each written file")
     level.add_argument("-q", "--quiet", action="store_true", help="show only warnings and errors")
@@ -108,6 +113,8 @@ def _parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     """Run the command with ``argv`` (default: ``sys.argv``) and give the exit code."""
     args = _parser().parse_args(argv)
+    if not args.hdf5_plugins:
+        skip_hdf5_plugins()
     handlers: list[logging.Handler] = []
     terminal = logging.StreamHandler(sys.stderr)
     terminal.setLevel(logging.DEBUG if args.verbose else logging.WARNING if args.quiet else logging.INFO)

@@ -3,13 +3,29 @@
 import glob
 import logging
 import os
+import tempfile
 from collections.abc import Sequence
 from dataclasses import dataclass
-from pathlib import PurePath
+from pathlib import Path, PurePath
 
 import xarray as xr
 
 log = logging.getLogger("lance_nd.cli")
+
+
+def skip_hdf5_plugins() -> None:
+    """Point ``HDF5_PLUGIN_PATH`` to an empty folder, unless it is already set.
+
+    netCDF4 searches its plugin folder on each ``Variable.filters()`` call,
+    which xarray makes for each variable: about 30 ms each on Windows. HDF5
+    has zlib and shuffle built in, so most files need no plugin. Call this
+    before the first file opens.
+    """
+    if "HDF5_PLUGIN_PATH" in os.environ:
+        return
+    empty = Path(tempfile.gettempdir()) / "lance_nd_no_hdf5_plugins"
+    empty.mkdir(exist_ok=True)
+    os.environ["HDF5_PLUGIN_PATH"] = str(empty)
 
 FILE_ATTRIBUTE = "source_file"
 MTIME_ATTRIBUTE = "source_mtime"

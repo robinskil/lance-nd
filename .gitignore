@@ -36,6 +36,7 @@ docs/superpowers/
 
 # Local test data and scripts
 testdata/
+scripts/
 
 # Fuzz output
 fuzz/target/

@@ -174,6 +174,18 @@ def test_file_attribute_replaces_an_existing_attribute(files, table_uri, capsys)
     assert titles(table_uri) == [(files / "a.nc").as_posix()]
 
 
+def test_hdf5_plugin_path(files, table_uri, tmp_path, monkeypatch):
+    monkeypatch.delenv("HDF5_PLUGIN_PATH", raising=False)
+    assert main(["create", "--hdf5-plugins", str(files / "a.nc"), table_uri]) == 0
+    assert "HDF5_PLUGIN_PATH" not in os.environ
+    assert main(["create", "--overwrite", str(files / "a.nc"), table_uri]) == 0
+    empty = os.environ["HDF5_PLUGIN_PATH"]
+    assert os.path.isdir(empty) and not os.listdir(empty)
+    monkeypatch.setenv("HDF5_PLUGIN_PATH", str(tmp_path))
+    assert main(["create", "--overwrite", str(files / "a.nc"), table_uri]) == 0
+    assert os.environ["HDF5_PLUGIN_PATH"] == str(tmp_path)
+
+
 def test_module_entry_point():
     result = subprocess.run(
         [sys.executable, "-m", "lance_nd", "--help"], capture_output=True, text=True, check=True

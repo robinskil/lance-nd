@@ -35,18 +35,29 @@ def _text(value: Any) -> Any:
     return value
 
 
+def _has_bytes(var: xr.Variable) -> bool:
+    """``True`` for a byte array, or an object array that holds ``bytes``."""
+    if var.dtype.kind == "S":
+        return True
+    return var.dtype == object and any(isinstance(value, bytes) for value in var.values.flat)
+
+
 def _bytes_as_text(ds: xr.Dataset) -> xr.Dataset:
     """``ds`` with byte variables and attributes as text, which nd-arrow-array stores."""
     owners: list[xr.Dataset | xr.Variable] = [ds, *ds.variables.values()]
-    has_bytes = any(var.dtype.kind == "S" for var in ds.variables.values()) or any(
+    byte_names = [name for name, var in ds.variables.items() if _has_bytes(var)]
+    has_bytes = bool(byte_names) or any(
         _text(value) is not value for owner in owners for value in owner.attrs.values()
     )
     if not has_bytes:
         return ds
     ds = ds.copy(deep=False)
-    for name, var in ds.variables.items():
+    for name in byte_names:
+        var = ds.variables[name]
         if var.dtype.kind == "S":
             ds[name] = var.copy(data=_text(var.values))
+        else:
+            ds[name] = var.copy(data=np.asarray(np.frompyfunc(_text, 1, 1)(var.values), dtype=object))
     owners = [ds, *ds.variables.values()]
     for owner in owners:
         owner.attrs = {key: _text(value) for key, value in owner.attrs.items()}

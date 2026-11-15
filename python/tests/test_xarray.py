@@ -170,3 +170,16 @@ def test_bytes_become_text(table_uri):
     assert read.station.values.tolist() == ["ab", "cé"]
     assert read.station.attrs["code"] == "x1"
     assert read.attrs["source"] == "buoy"
+
+
+@pytest.mark.parametrize("shape", [(2, 2), ()])
+def test_object_bytes_become_text(table_uri, shape):
+    # xarray decodes netCDF char flag variables as object arrays of bytes.
+    flags = np.empty(shape, dtype=object)
+    flags[...] = b"1"
+    if shape:
+        flags[0, 1] = b"c\xc3\xa9"
+    ds = xr.Dataset({"flag": (("t", "d")[: len(shape)], flags)})
+    (read,) = round_trip(table_uri, ds)
+    expected = [["1", "cé"], ["1", "1"]] if shape else "1"
+    assert read.flag.values.tolist() == expected

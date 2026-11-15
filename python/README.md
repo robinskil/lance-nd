@@ -132,6 +132,12 @@ The log names each skipped file, variable and attribute. Run
 command. The package installs the `netCDF4` and `h5netcdf` engines, so
 xarray can open netCDF 3 and netCDF 4 files.
 
+netCDF4 searches its HDF5 filter plugin folder for each variable of each
+file, which can make an open many times slower. So the command sets
+`HDF5_PLUGIN_PATH` to an empty folder, unless you set it yourself. HDF5 has
+zlib and shuffle built in. For files with zstd, blosc, bzip2 or szip
+compression, add `--hdf5-plugins`.
+
 The [Python wiki page](https://github.com/robinskil/lance-nd/wiki/Python)
 explains the writer rules, chunks, encoding options, stats, scans, casting,
 object stores and the encoding rules.

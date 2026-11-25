@@ -1,5 +1,6 @@
 """Create, append to and open lance-nd tables."""
 
+import warnings
 from collections.abc import Sequence
 from types import TracebackType
 from typing import Any, TypeGuard
@@ -14,6 +15,12 @@ from lance_nd._typing import ArrowData, Casting, ColumnOptions, Mode, OnDrop
 
 Table = _lance_nd.Table
 Scanner = _lance_nd.Scanner
+
+
+_DEFER_WARNING = (
+    "defer_promotion: no other writer may write to the table until finish(). "
+    "A commit of another writer makes finish() fail, or is lost."
+)
 
 
 def _is_arrow(data: object) -> TypeGuard[ArrowData]:
@@ -187,6 +194,7 @@ def create(
     write_parallelism: int | None = None,
     casting: Casting = "no",
     storage_options: dict[str, str] | None = None,
+    defer_promotion: bool = False,
 ) -> Writer:
     """A writer for a new table. ``mode`` is "create" or "overwrite".
 
@@ -202,6 +210,14 @@ def create(
     the writer widens the variable in the table to the smallest type that
     holds both, see :meth:`Table.widen`. A writer first commits the
     datasets that it wrote before such a widening.
+
+    ``defer_promotion`` keeps these commits and the widening out of sight
+    until ``finish()``, which then makes all datasets visible in one commit.
+    An abort leaves the table unchanged. It applies only to a table that
+    exists when the writer starts. Only one writer may write to the table
+    while the flag is on: when another writer commits first, ``finish()``
+    fails and commits nothing. A commit between that check and the final
+    commit is lost. The writer gives a ``UserWarning`` about this.
 
     ``storage_options`` are the Lance storage options, for example
     ``aws_region`` or ``aws_endpoint``. An empty value uses the defaults of
@@ -222,7 +238,10 @@ def create(
         write_parallelism,
         casting,
         storage_options,
+        defer_promotion,
     )
+    if defer_promotion:
+        warnings.warn(_DEFER_WARNING, stacklevel=2)
     return Writer(native)
 
 
@@ -233,9 +252,11 @@ def append(
     write_parallelism: int | None = None,
     casting: Casting = "no",
     storage_options: dict[str, str] | None = None,
+    defer_promotion: bool = False,
 ) -> Writer:
     """A writer that appends to an existing table. See :func:`create` for
-    the fragment options, ``casting`` and ``storage_options``."""
+    the fragment options, ``casting``, ``storage_options`` and
+    ``defer_promotion``."""
     native = _lance_nd.Writer.append(
         uri,
         column_options,
@@ -243,7 +264,10 @@ def append(
         write_parallelism,
         casting,
         storage_options,
+        defer_promotion,
     )
+    if defer_promotion:
+        warnings.warn(_DEFER_WARNING, stacklevel=2)
     return Writer(native)
 
 

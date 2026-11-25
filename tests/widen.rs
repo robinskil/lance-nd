@@ -387,4 +387,148 @@ mod promote {
         assert_eq!(dataset.version().version, 1);
         assert_eq!(value_type(&dataset, "v"), DataType::Float64);
     }
+
+    mod deferred {
+        use super::*;
+
+        fn deferred() -> WriteOptions {
+            WriteOptions {
+                defer_promotion: true,
+                ..options(Casting::Promote)
+            }
+        }
+
+        /// An append writer that wrote a Float32 row and a Float64 row of `v`.
+        async fn promoted(dataset: &Dataset) -> NdWriter {
+            let mut writer = NdWriter::append(dataset.uri(), &deferred()).await.unwrap();
+            writer
+                .write(one("v", Arc::new(Float32Array::from(vec![4.5f32]))))
+                .await
+                .unwrap();
+            writer
+                .write(one("v", Arc::new(Float64Array::from(vec![0.1]))))
+                .await
+                .unwrap();
+            writer
+        }
+
+        #[tokio::test]
+        async fn finish_makes_one_commit() {
+            let dir = tempfile::tempdir().unwrap();
+            let dataset = table(&dir, true).await;
+            let mut writer = promoted(&dataset).await;
+            writer
+                .write(one("x", Arc::new(Int32Array::from(vec![5]))))
+                .await
+                .unwrap();
+
+            // Readers do not see the widen or the rows before finish.
+            let before = Dataset::open(dataset.uri()).await.unwrap();
+            assert_eq!(before.version().version, 1);
+            assert_eq!(value_type(&before, "v"), DataType::Float32);
+
+            let dataset = writer.finish().await.unwrap();
+            assert_eq!(dataset.version().version, 2);
+            let latest = Dataset::open(dataset.uri()).await.unwrap();
+            assert_eq!(latest.version().version, 2);
+            assert_eq!(value_type(&latest, "v"), DataType::Float64);
+            assert_eq!(stats_type(&latest, "v"), DataType::Float64);
+            assert_eq!(value_type(&latest, "x"), DataType::Int32);
+            assert_eq!(
+                v_values(&latest).await,
+                [
+                    Some(vec![1.5, 2.5]),
+                    None,
+                    Some(vec![7.0]),
+                    Some(vec![4.5]),
+                    Some(vec![0.1]),
+                    None
+                ]
+            );
+        }
+
+        #[tokio::test]
+        async fn abort_leaves_the_table_unchanged() {
+            let dir = tempfile::tempdir().unwrap();
+            let dataset = table(&dir, true).await;
+            promoted(&dataset).await.abort();
+            let latest = Dataset::open(dataset.uri()).await.unwrap();
+            assert_eq!(latest.version().version, 1);
+            assert_eq!(value_type(&latest, "v"), DataType::Float32);
+            assert_eq!(scan(&latest).try_collect().await.unwrap().len(), 3);
+        }
+
+        #[tokio::test]
+        async fn another_commit_makes_finish_fail() {
+            let dir = tempfile::tempdir().unwrap();
+            let dataset = table(&dir, true).await;
+            let writer = promoted(&dataset).await;
+            let mut other = NdWriter::append(dataset.uri(), &WriteOptions::default())
+                .await
+                .unwrap();
+            other
+                .write(one("v", Arc::new(Float32Array::from(vec![9.0f32]))))
+                .await
+                .unwrap();
+            other.finish().await.unwrap();
+
+            let result = writer.finish().await;
+            assert!(
+                matches!(
+                    result,
+                    Err(Error::CommitConflict {
+                        retryable: false,
+                        ..
+                    })
+                ),
+                "{result:?}"
+            );
+            let latest = Dataset::open(dataset.uri()).await.unwrap();
+            assert_eq!(latest.version().version, 2);
+            assert_eq!(value_type(&latest, "v"), DataType::Float32);
+            assert_eq!(scan(&latest).try_collect().await.unwrap().len(), 4);
+        }
+
+        #[tokio::test]
+        async fn overwrite_makes_one_commit() {
+            let dir = tempfile::tempdir().unwrap();
+            let dataset = table(&dir, true).await;
+            let overwrite = WriteOptions {
+                mode: WriteMode::Overwrite,
+                ..deferred()
+            };
+            let mut writer = NdWriter::create(dataset.uri(), &overwrite).await.unwrap();
+            writer
+                .write(one("v", Arc::new(Float32Array::from(vec![1.5f32]))))
+                .await
+                .unwrap();
+            writer
+                .write(one("v", Arc::new(Float64Array::from(vec![0.1]))))
+                .await
+                .unwrap();
+            let dataset = writer.finish().await.unwrap();
+            let latest = Dataset::open(dataset.uri()).await.unwrap();
+            assert_eq!(latest.version().version, 2);
+            assert_eq!(value_type(&latest, "v"), DataType::Float64);
+            assert_eq!(v_values(&latest).await, [Some(vec![1.5]), Some(vec![0.1])]);
+        }
+
+        #[tokio::test]
+        async fn a_new_table_widens_as_without_the_flag() {
+            let dir = tempfile::tempdir().unwrap();
+            let uri = dir.path().join("table.lance").to_str().unwrap().to_string();
+            let mut writer = NdWriter::create(&uri, &deferred()).await.unwrap();
+            writer
+                .write(one("v", Arc::new(Float32Array::from(vec![1.5f32]))))
+                .await
+                .unwrap();
+            writer
+                .write(one("v", Arc::new(Float64Array::from(vec![0.1]))))
+                .await
+                .unwrap();
+            let dataset = writer.finish().await.unwrap();
+            assert_eq!(dataset.version().version, 3);
+            assert_eq!(v_values(&dataset).await, [Some(vec![1.5]), Some(vec![0.1])]);
+        }
+    }
 }

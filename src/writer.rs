@@ -49,13 +49,19 @@ use crate::write::{
 /// A writer that is aborted or dropped commits nothing, and stops its
 /// fragment writes. Its data files stay until a Lance cleanup removes them. One exception: under
 /// [`Casting::Promote`], a write that widens the table first commits the
-/// rows written before it.
+/// rows written before it. With [`WriteOptions::defer_promotion`], these
+/// commits and the widen are detached Lance versions that readers do not
+/// see, and `finish` makes the last one the table version.
 pub struct NdWriter {
     uri: String,
     /// The table at the start, for an append or an overwrite.
     base: Option<Dataset>,
     /// `true` when `finish` replaces the table.
     overwrite: bool,
+    /// The version of the table when the writer starts.
+    start_version: Option<u64>,
+    /// `true` after a deferred widen: each commit is then a detached version.
+    detached: bool,
     defaults: ColumnOptions,
     /// `true` when the rows get stats.
     stats: bool,
@@ -98,6 +104,8 @@ impl NdWriter {
         };
         Ok(Self {
             uri: uri.to_string(),
+            start_version: existing.as_ref().map(|dataset| dataset.version().version),
+            detached: false,
             base: existing,
             overwrite,
             defaults: options.column_defaults.clone().unwrap_or_default(),
@@ -126,6 +134,8 @@ impl NdWriter {
         let schema = (Schema::from(dataset.schema()), dataset.schema().clone());
         Ok(Self {
             uri: uri.to_string(),
+            start_version: Some(dataset.version().version),
+            detached: false,
             base: Some(dataset),
             overwrite: false,
             defaults,
@@ -225,13 +235,22 @@ impl NdWriter {
             return Ok(());
         }
         let result = async {
+            if self.options.defer_promotion && self.start_version.is_some() && !self.detached {
+                tracing::warn!(
+                    uri = %self.uri,
+                    "defer_promotion: no other writer may write to the table until finish"
+                );
+                self.detached = true;
+            }
             let staged =
                 !(self.buffer.is_empty() && self.pending.is_empty() && self.fragments.is_empty());
             if staged || self.base.is_none() {
                 self.commit().await?;
             }
             let dataset = self.base.as_mut().expect("a committed table");
-            widen_all(dataset, &widenings).boxed().await?;
+            widen_all(dataset, &widenings, self.detached)
+                .boxed()
+                .await?;
             self.schema = Some((Schema::from(dataset.schema()), dataset.schema().clone()));
             Ok(())
         }
@@ -334,7 +353,9 @@ impl NdWriter {
         let (Some(base), Some((arrow, _))) = (self.base.as_mut(), self.schema.as_ref()) else {
             return Ok(());
         };
-        if self.overwrite {
+        // add_columns commits a table version, which a detached write must not
+        // do. The final commit then adds the new fields.
+        if self.overwrite || self.detached {
             return Ok(());
         }
         let missing = missing_fields(Schema::from(base.schema()).fields(), arrow.fields());
@@ -384,7 +405,11 @@ impl NdWriter {
         }
         // Boxed without its type: the commit future is large, and its full
         // type would exceed the compiler's layout and Send depth for callers.
-        self.commit().boxed().await
+        let dataset = self.commit().boxed().await?;
+        match (self.detached, self.start_version) {
+            (true, Some(start)) => publish(dataset, start).boxed().await,
+            _ => Ok(dataset),
+        }
     }
 
     /// Commit the staged rows. The writer then appends to the new version.
@@ -425,12 +450,15 @@ impl NdWriter {
                 let version = base.version().version;
                 let operation = overwrite_operation(numbered(fragments, 0), schema);
                 CommitBuilder::new(Arc::new(base))
+                    .with_detached(self.detached)
                     .execute(Transaction::new(version, operation, None))
                     .await?
             }
             // No new fields: new rows only, which Lance merges with concurrent appends.
             (Some(base), false) if schema.max_field_id() == base.schema().max_field_id() => {
-                commit_rows(base, fragments, &schema).boxed().await?
+                commit_rows(base, fragments, &schema, self.detached)
+                    .boxed()
+                    .await?
             }
             (Some(base), false) => {
                 let version = base.version().version;
@@ -448,6 +476,7 @@ impl NdWriter {
                     preserves_nullability: true,
                 };
                 CommitBuilder::new(Arc::new(base))
+                    .with_detached(self.detached)
                     .execute(Transaction::new(version, operation, None))
                     .await?
             }
@@ -539,12 +568,14 @@ const MAX_COMMIT_ATTEMPTS: usize = 10;
 /// The commit is an `Update` with new fragments only. Lance merges it with
 /// concurrent appends, deletes and compactions. A concurrent schema change,
 /// for example a widen, makes Lance reject it. Then the writer checks that
-/// the table still has each field of the fragments, and tries again.
+/// the table still has each field of the fragments, and tries again. A
+/// `detached` commit makes a detached version, which has no concurrent commits.
 #[tracing::instrument(level = "debug", skip_all, fields(fragments = fragments.len()))]
 async fn commit_rows(
     mut base: Dataset,
     fragments: Vec<Fragment>,
     staged: &LanceSchema,
+    detached: bool,
 ) -> Result<Dataset> {
     for attempt in 1..=MAX_COMMIT_ATTEMPTS {
         check_fields(&base, &fragments, staged)?;
@@ -561,11 +592,14 @@ async fn commit_rows(
         };
         let version = base.version().version;
         match CommitBuilder::new(Arc::new(base.clone()))
+            .with_detached(detached)
             .execute(Transaction::new(version, operation, None))
             .await
         {
             Ok(dataset) => return Ok(dataset),
-            Err(lance::Error::RetryableCommitConflict { .. }) if attempt < MAX_COMMIT_ATTEMPTS => {
+            Err(lance::Error::RetryableCommitConflict { .. })
+                if attempt < MAX_COMMIT_ATTEMPTS && !detached =>
+            {
                 tracing::debug!(attempt, "a concurrent commit preempted the rows, try again");
                 base.checkout_latest().await?;
             }
@@ -573,6 +607,31 @@ async fn commit_rows(
         }
     }
     unreachable!("the last attempt returns")
+}
+
+/// Make the detached version `staged` the table version, in one Restore
+/// commit. Fails and commits nothing when the table changed after
+/// `start_version`.
+#[tracing::instrument(level = "debug", skip_all, fields(uri = %staged.uri()), err)]
+async fn publish(mut staged: Dataset, start_version: u64) -> Result<Dataset> {
+    let latest = staged.latest_version_id().await?;
+    if latest != start_version {
+        return Err(Error::CommitConflict {
+            retryable: false,
+            source: Box::new(lance::Error::invalid_input(format!(
+                "with defer_promotion, the table must stay at version {start_version} \
+                 until finish, but another writer committed version {latest}, \
+                 nothing is committed"
+            ))),
+        });
+    }
+    // A Restore does not conflict with a concurrent commit, it replaces it.
+    staged.restore().await?;
+    tracing::info!(
+        version = staged.version().version,
+        "committed the rows and the widens"
+    );
+    Ok(staged)
 }
 
 /// Fails when `table` lacks a field that the data files of `fragments` hold.

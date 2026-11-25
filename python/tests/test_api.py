@@ -363,6 +363,36 @@ def test_casting_promote_widens_the_table(table_uri):
     assert titles(table.scan(prune="sst.values > 2")) == ["a", "b", "c"]
 
 
+def test_defer_promotion_commits_once(table_uri):
+    with lance_nd.create(table_uri, stats=True) as writer:
+        writer.write(typed_dataset("a", np.float32))
+    with pytest.warns(UserWarning, match="no other writer"):
+        writer = lance_nd.append(table_uri, casting="promote", defer_promotion=True)
+    with writer:
+        writer.write(typed_dataset("b", np.float32))
+        writer.write(typed_dataset("c", np.float64))
+        assert lance_nd.open(table_uri).version == 1
+    table = lance_nd.open(table_uri)
+    assert table.version == 2
+    assert sst_types(table) == ["double"] * 3
+    assert titles(table.scan(prune="sst.values > 2")) == ["a", "b", "c"]
+
+
+def test_defer_promotion_abort_changes_nothing(table_uri):
+    with lance_nd.create(table_uri) as writer:
+        writer.write(typed_dataset("a", np.float32))
+    with pytest.warns(UserWarning):
+        writer = lance_nd.append(table_uri, casting="promote", defer_promotion=True)
+    with pytest.raises(RuntimeError):
+        with writer:
+            writer.write(typed_dataset("b", np.float32))
+            writer.write(typed_dataset("c", np.float64))
+            raise RuntimeError("stop")
+    table = lance_nd.open(table_uri)
+    assert table.version == 1
+    assert sst_types(table) == ["float"]
+
+
 def test_error_classes(table_uri, tmp_path):
     missing = str(tmp_path / "missing.lance")
     with pytest.raises(lance_nd.TableNotFoundError):

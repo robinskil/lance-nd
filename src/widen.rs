@@ -37,16 +37,17 @@ const TEMPORARY_PREFIX: &str = "__widen__";
 #[tracing::instrument(skip_all, fields(uri = %dataset.uri(), variable = %variable, to = %to), err)]
 pub async fn widen(dataset: &mut Dataset, variable: &str, to: &DataType) -> Result<()> {
     // Boxed: the rewrite future is large, and exceeds the layout depth of callers.
-    widen_all(dataset, &[(variable.to_string(), to.clone())])
+    widen_all(dataset, &[(variable.to_string(), to.clone())], false)
         .boxed()
         .await
 }
 
 /// Change the value types of several variables as [`widen`] does, in one
-/// rewrite and one Lance commit.
+/// rewrite and one Lance commit. A `detached` widen makes a detached version.
 pub(crate) async fn widen_all(
     dataset: &mut Dataset,
     widenings: &[(String, DataType)],
+    detached: bool,
 ) -> Result<()> {
     check_format(dataset)?;
     let schema = Schema::from(dataset.schema());
@@ -57,7 +58,7 @@ pub(crate) async fn widen_all(
     if columns.is_empty() {
         return Ok(());
     }
-    rewrite(dataset, &columns).await
+    rewrite(dataset, &columns, detached).await
 }
 
 /// The old and new fields of `variable` and its stats for a widen to `to`.
@@ -151,12 +152,12 @@ const MAX_ATTEMPTS: usize = 10;
 /// Each fragment gets a new data file with the new columns, under new field
 /// ids and the old names. A concurrent append or writer commit conflicts with
 /// this commit, so no row keeps a field id that the widen removes.
-async fn rewrite(dataset: &mut Dataset, columns: &[(Field, Field)]) -> Result<()> {
+async fn rewrite(dataset: &mut Dataset, columns: &[(Field, Field)], detached: bool) -> Result<()> {
     for attempt in 1..=MAX_ATTEMPTS {
-        match rewrite_once(dataset, columns).await {
+        match rewrite_once(dataset, columns, detached).await {
             Err(Error::CommitConflict {
                 retryable: true, ..
-            }) if attempt < MAX_ATTEMPTS => {
+            }) if attempt < MAX_ATTEMPTS && !detached => {
                 tracing::debug!(
                     attempt,
                     "a concurrent commit preempted the widen, try again"
@@ -169,7 +170,11 @@ async fn rewrite(dataset: &mut Dataset, columns: &[(Field, Field)]) -> Result<()
     unreachable!("the last attempt returns")
 }
 
-async fn rewrite_once(dataset: &mut Dataset, columns: &[(Field, Field)]) -> Result<()> {
+async fn rewrite_once(
+    dataset: &mut Dataset,
+    columns: &[(Field, Field)],
+    detached: bool,
+) -> Result<()> {
     let temporary: Vec<Field> = columns
         .iter()
         .map(|(_, new)| {
@@ -232,6 +237,7 @@ async fn rewrite_once(dataset: &mut Dataset, columns: &[(Field, Field)]) -> Resu
         preserves_nullability: true,
     };
     *dataset = CommitBuilder::new(Arc::new(dataset.clone()))
+        .with_detached(detached)
         .execute(Transaction::new(read_version, operation, None))
         .await?;
     Ok(())

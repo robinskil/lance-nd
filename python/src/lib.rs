@@ -124,6 +124,7 @@ impl Writer {
         write_parallelism = None,
         casting = "no",
         storage_options = None,
+        defer_promotion = false,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn create(
@@ -137,6 +138,7 @@ impl Writer {
         write_parallelism: Option<usize>,
         casting: &str,
         storage_options: Option<HashMap<String, String>>,
+        defer_promotion: bool,
     ) -> PyResult<Self> {
         let mode = match mode {
             "create" => WriteMode::Create,
@@ -154,6 +156,7 @@ impl Writer {
                 column_options: parse_column_options(column_options)?,
                 stats,
                 casting: parse_casting(casting)?,
+                defer_promotion,
                 storage_options: storage_options.unwrap_or_default(),
                 ..Default::default()
             },
@@ -176,7 +179,9 @@ impl Writer {
         write_parallelism = None,
         casting = "no",
         storage_options = None,
+        defer_promotion = false,
     ))]
+    #[allow(clippy::too_many_arguments)]
     fn append(
         py: Python<'_>,
         uri: String,
@@ -185,11 +190,13 @@ impl Writer {
         write_parallelism: Option<usize>,
         casting: &str,
         storage_options: Option<HashMap<String, String>>,
+        defer_promotion: bool,
     ) -> PyResult<Self> {
         let options = fragment_options(
             WriteOptions {
                 column_options: parse_column_options(column_options)?,
                 casting: parse_casting(casting)?,
+                defer_promotion,
                 storage_options: storage_options.unwrap_or_default(),
                 ..Default::default()
             },

@@ -40,13 +40,15 @@ class Writer:
         write_parallelism: int | None = None,
         casting: Casting = "no",
         storage_options: dict[str, str] | None = None,
+        defer_promotion: bool = False,
     ) -> Writer:
         """A writer for a new table. ``mode`` is "create" or "overwrite".
 
         ``stats`` stores the min and max of each variable per row.
         ``target_fragment_bytes`` and ``write_parallelism`` override the
         fragment size and the number of parallel fragment writes.
-        ``casting`` is "no", "safe", "same_kind" or "promote", see
+        ``casting`` is "no", "safe", "same_kind" or "promote", and
+        ``defer_promotion`` delays its widenings to ``finish()``, see
         ``lance_nd.create``.
         """
 
@@ -58,6 +60,7 @@ class Writer:
         write_parallelism: int | None = None,
         casting: Casting = "no",
         storage_options: dict[str, str] | None = None,
+        defer_promotion: bool = False,
     ) -> Writer:
         """A writer that appends to an existing table."""
 

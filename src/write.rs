@@ -59,6 +59,16 @@ pub struct WriteOptions {
     /// How a write treats a variable or attribute type that differs from the
     /// table, see [`Casting`].
     pub casting: Casting,
+    /// Under [`Casting::Promote`], keep the widens of a [`crate::NdWriter`]
+    /// out of sight until [`crate::NdWriter::finish`]. `finish` then makes
+    /// all rows and widens visible in one commit, and an abort leaves the
+    /// table unchanged. It applies only to a table that exists when the
+    /// writer starts.
+    ///
+    /// Only one writer may write to the table while the flag is on. When
+    /// another commit changes the table first, `finish` fails and commits
+    /// nothing. A commit between that check and the final commit is lost.
+    pub defer_promotion: bool,
     /// [`crate::NdWriter`] buffers rows until they have about this many
     /// bytes on disk, then writes them as one Lance fragment. The writer
     /// learns the ratio of disk to memory bytes from the fragments it wrote.
@@ -84,6 +94,7 @@ impl Default for WriteOptions {
             column_options: HashMap::new(),
             stats: false,
             casting: Casting::No,
+            defer_promotion: false,
             target_fragment_bytes: 128 << 20,
             write_parallelism: 4,
             storage_options: StorageOptions::new(),

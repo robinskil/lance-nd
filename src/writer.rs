@@ -25,7 +25,7 @@ use crate::options::ColumnOptions;
 use crate::schema::{concat_conformed, holds_schema, merge_schemas, missing_fields, used_fields};
 use crate::stats::{STATS_PREFIX, is_stats_name};
 use crate::store::{StorageOptions, open_dataset, store_params};
-use crate::widen::{promotions, widen};
+use crate::widen::{promotions, widen_all};
 use crate::write::{
     FILE_VERSION, WriteMode, WriteOptions, next_group, prepare_batch, table_defaults,
     table_has_stats,
@@ -231,9 +231,7 @@ impl NdWriter {
                 self.commit().await?;
             }
             let dataset = self.base.as_mut().expect("a committed table");
-            for (variable, to) in &widenings {
-                widen(dataset, variable, to).boxed().await?;
-            }
+            widen_all(dataset, &widenings).boxed().await?;
             self.schema = Some((Schema::from(dataset.schema()), dataset.schema().clone()));
             Ok(())
         }

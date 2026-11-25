@@ -286,6 +286,55 @@ mod promote {
         assert_eq!(rows.len(), 1);
     }
 
+    /// One row with the 1-D variables `v` and `w`.
+    fn pair(v: ArrayRef, w: ArrayRef) -> NdRecordBatch {
+        let fields = vec![
+            Field::new("v", v.data_type().clone(), true),
+            Field::new("w", w.data_type().clone(), true),
+        ];
+        let arrays = vec![
+            NdArrowArray::try_new(
+                v.clone(),
+                Dimensions::try_new([("v_dim", v.len())]).unwrap(),
+            )
+            .unwrap(),
+            NdArrowArray::try_new(
+                w.clone(),
+                Dimensions::try_new([("w_dim", w.len())]).unwrap(),
+            )
+            .unwrap(),
+        ];
+        NdRecordBatch::try_new_inferred(Arc::new(Schema::new(fields)), arrays).unwrap()
+    }
+
+    #[tokio::test]
+    async fn widens_all_variables_of_a_row_in_one_commit() {
+        let dir = tempfile::tempdir().unwrap();
+        let uri = dir.path().join("table.lance").to_str().unwrap().to_string();
+        let mut writer = NdWriter::create(&uri, &options(Casting::Promote))
+            .await
+            .unwrap();
+        let narrow = pair(
+            Arc::new(Float32Array::from(vec![1.5f32])),
+            Arc::new(Float32Array::from(vec![2.5f32])),
+        );
+        let wide = pair(
+            Arc::new(Float64Array::from(vec![0.1])),
+            Arc::new(Float64Array::from(vec![0.2])),
+        );
+        writer.write(stream::iter([Ok(narrow)])).await.unwrap();
+        writer.write(stream::iter([Ok(wide)])).await.unwrap();
+        let dataset = writer.finish().await.unwrap();
+        // Version 1 has the first row, version 2 widens v and w, version 3
+        // has the second row.
+        assert_eq!(dataset.version().version, 3);
+        for variable in ["v", "w"] {
+            assert_eq!(value_type(&dataset, variable), DataType::Float64);
+            assert_eq!(stats_type(&dataset, variable), DataType::Float64);
+        }
+        assert_eq!(v_values(&dataset).await, [Some(vec![1.5]), Some(vec![0.1])]);
+    }
+
     #[tokio::test]
     async fn promotes_to_a_common_type() {
         // As numpy: int32 and float32 promote to float64.

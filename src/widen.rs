@@ -11,6 +11,7 @@ use std::sync::Arc;
 use arrow::array::RecordBatch;
 use arrow::compute::cast;
 use arrow::datatypes::{DataType, Field, Fields, Schema, SchemaRef};
+use futures::FutureExt;
 use lance::Dataset;
 use lance::dataset::transaction::{Operation, Transaction};
 use lance::dataset::{BatchUDF, CommitBuilder, NewColumnTransform};
@@ -35,8 +36,33 @@ const TEMPORARY_PREFIX: &str = "__widen__";
 /// again, up to a limit.
 #[tracing::instrument(skip_all, fields(uri = %dataset.uri(), variable = %variable, to = %to), err)]
 pub async fn widen(dataset: &mut Dataset, variable: &str, to: &DataType) -> Result<()> {
+    // Boxed: the rewrite future is large, and exceeds the layout depth of callers.
+    widen_all(dataset, &[(variable.to_string(), to.clone())])
+        .boxed()
+        .await
+}
+
+/// Change the value types of several variables as [`widen`] does, in one
+/// rewrite and one Lance commit.
+pub(crate) async fn widen_all(
+    dataset: &mut Dataset,
+    widenings: &[(String, DataType)],
+) -> Result<()> {
     check_format(dataset)?;
     let schema = Schema::from(dataset.schema());
+    let mut columns = Vec::new();
+    for (variable, to) in widenings {
+        columns.extend(widen_columns(&schema, variable, to)?);
+    }
+    if columns.is_empty() {
+        return Ok(());
+    }
+    rewrite(dataset, &columns).await
+}
+
+/// The old and new fields of `variable` and its stats for a widen to `to`.
+/// Empty when `to` is the type of `variable`.
+fn widen_columns(schema: &Schema, variable: &str, to: &DataType) -> Result<Vec<(Field, Field)>> {
     let field = schema
         .field_with_name(variable)
         .ok()
@@ -46,7 +72,7 @@ pub async fn widen(dataset: &mut Dataset, variable: &str, to: &DataType) -> Resu
         })?;
     let from = value_type(field)?;
     if &from == to {
-        return Ok(());
+        return Ok(Vec::new());
     }
     if !allowed(&from, to, Casting::Safe) {
         return Err(Error::InvalidArgument(format!(
@@ -57,7 +83,7 @@ pub async fn widen(dataset: &mut Dataset, variable: &str, to: &DataType) -> Resu
     if let Ok(stats) = schema.field_with_name(&stats_column(variable)) {
         columns.push((stats.clone(), map_children(stats, |_| to.clone())));
     }
-    rewrite(dataset, &columns).await
+    Ok(columns)
 }
 
 /// The variables of `batch` that need a wider type in `table` under

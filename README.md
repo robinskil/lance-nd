@@ -48,7 +48,7 @@ such as one xarray dataset.
 
 ```toml
 [dependencies]
-lance-nd = "0.1"
+lance-nd = "0.2"
 nd-arrow-array = "0.5"
 ```
 

@@ -42,6 +42,8 @@ such as one xarray dataset.
 - Rows can have different variables. New variables and attributes extend
   the table schema.
 - Optional per-row stats let a scan skip rows on value filters.
+- A variable can get a wider type, for example `Float32` to `Float64`. Only
+  that column is written again, also in a table with thousands of variables.
 - Tables live on local disk, S3, Google Cloud Storage or Azure.
 
 ## Install
@@ -103,6 +105,25 @@ The [wiki](https://github.com/robinskil/lance-nd/wiki) explains each part in dep
 - [Python](https://github.com/robinskil/lance-nd/wiki/Python): the full Python API and the encoding rules.
 
 [FORMAT.md](FORMAT.md) is the specification of the lance-nd table.
+
+## Tests
+
+```bash
+cargo test --workspace
+```
+
+The scale and performance tests do not run by default. Run them in release
+mode:
+
+```bash
+cargo test --release --test scale -- --ignored --nocapture
+cargo test --release --test perf -- --ignored --nocapture --test-threads 1
+```
+
+The `perf` tests time a widen and an append against the number of
+variables, and measure the memory of a writer. Environment variables such
+as `LANCE_ND_WIDTHS` and `LANCE_ND_FILES` set the sizes, see the top of
+`tests/perf.rs`.
 
 ## Status
 

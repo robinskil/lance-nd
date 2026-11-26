@@ -46,6 +46,7 @@ and writes are several times slower.
 ## Usage
 
 ```python
+import pyarrow as pa
 import xarray as xr
 import lance_nd
 
@@ -61,6 +62,9 @@ with lance_nd.append("data.lance") as writer:
 table = lance_nd.open("data.lance")
 for batch in table.scan(filter="__global_attrs__.title = 'a'", prune="sst.values > 300"):
     ds = batch.to_xarray()               # an nd_arrow_array.NdRecordBatch
+
+# Give a variable a wider type. Only its column and its stats are written again.
+table.widen("sst", pa.float64())
 ```
 
 ## Command line
@@ -85,7 +89,10 @@ Use these options for files that the table cannot store:
   dict.
 - `--skip-errors` skips a file that fails and continues with the next file.
   Without it, the first error stops the command and it commits nothing.
-- `--casting` sets the casting rule of the writer, see `create()`.
+- `--casting` sets the casting rule of the writer, see `create()`. With
+  `--casting promote`, a file that needs a wider type first commits the
+  rows before it, then widens the variable. Readers then see more than one
+  new version.
 
 The command adds three global attributes to each row: `source_file` is the
 file path with `/` separators, `source_mtime` is the modification time in

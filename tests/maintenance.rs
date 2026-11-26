@@ -260,3 +260,113 @@ async fn delete_by_value() {
     assert_eq!(deleted, 1);
     assert_eq!(ids(&dataset).await, [0, 1, 3]);
 }
+
+/// Row `id` of variable family `family`: 100 variables of one value each,
+/// which no other family has.
+fn family_row(id: i64, family: i64) -> NdRecordBatch {
+    let (fields, arrays): (Vec<_>, Vec<_>) = (0..100)
+        .map(|j| {
+            let values = Int64Array::from(vec![id * 1000 + j]);
+            variable(&format!("f{family}_v{j}"), Arc::new(values))
+        })
+        .unzip();
+    NdRecordBatch::try_new_inferred(Arc::new(Schema::new(fields)), arrays)
+        .unwrap()
+        .with_attributes(Attributes::new().with("id", format!("r{id}")))
+}
+
+/// The top-level column names of each fragment.
+fn fragment_columns(dataset: &Dataset) -> Vec<std::collections::HashSet<String>> {
+    fn ids(field: &lance_core::datatypes::Field, out: &mut Vec<i32>) {
+        out.push(field.id);
+        field.children.iter().for_each(|child| ids(child, out));
+    }
+    let mut owner = std::collections::HashMap::new();
+    for field in &dataset.schema().fields {
+        let mut all = Vec::new();
+        ids(field, &mut all);
+        for id in all {
+            owner.insert(id, field.name.clone());
+        }
+    }
+    dataset
+        .get_fragments()
+        .iter()
+        .map(|fragment| {
+            fragment
+                .metadata()
+                .files
+                .iter()
+                .flat_map(|file| file.fields.iter())
+                .filter_map(|id| owner.get(id).cloned())
+                .collect()
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn cluster_mode_merges_similar_fragments_from_anywhere() {
+    let dir = tempfile::tempdir().unwrap();
+    let uri = dir.path().join("table.lance").to_str().unwrap().to_string();
+    let options = WriteOptions {
+        max_rows_per_group: 1,
+        target_fragment_bytes: 1,
+        ..Default::default()
+    };
+    // Six families, two rows each, in turn: no two neighbors are alike.
+    let rows: Vec<_> = (0..12).map(|id| Ok(family_row(id, id % 6))).collect();
+    let mut writer = NdWriter::create(&uri, &options).await.unwrap();
+    writer.write(stream::iter(rows)).await.unwrap();
+    let mut dataset = writer.finish().await.unwrap();
+    assert_eq!(dataset.get_fragments().len(), 12);
+    let mut expected: Vec<NdRecordBatch> = scan(&dataset).try_collect().await.unwrap();
+
+    let options = CompactOptions {
+        cluster: true,
+        ..Default::default()
+    };
+    let metrics = compact(&mut dataset, &options).await.unwrap();
+    assert_eq!(metrics.fragments_removed, 12);
+    let fragments = fragment_columns(&dataset);
+    assert!(
+        fragments.len() < 12 && fragments.len() > 1,
+        "{} fragments",
+        fragments.len()
+    );
+    for family in 0..6 {
+        let holders = fragments
+            .iter()
+            .filter(|columns| columns.contains(&format!("f{family}_v0")))
+            .count();
+        assert_eq!(holders, 1, "the rows of family {family} share one fragment");
+    }
+    // At most 4 times the widest old fragment: 4 families and the attributes.
+    assert!(fragments.iter().all(|columns| columns.len() <= 4 * 101));
+
+    let mut rows: Vec<NdRecordBatch> = scan(&dataset).try_collect().await.unwrap();
+    let key = |row: &NdRecordBatch| format!("{:?}", row.attributes());
+    rows.sort_by_key(key);
+    expected.sort_by_key(key);
+    assert_eq!(rows.len(), expected.len());
+    for (row, want) in rows.iter().zip(&expected) {
+        assert_eq!(row.columns(), want.columns());
+        assert_eq!(row.attributes(), want.attributes());
+    }
+}
+
+#[tokio::test]
+async fn cluster_mode_removes_deleted_rows() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut dataset = table(&dir, 6, false).await;
+    delete(&mut dataset, "__global_attrs__.id = 'r2'")
+        .await
+        .unwrap();
+    let options = CompactOptions {
+        cluster: true,
+        ..Default::default()
+    };
+    compact(&mut dataset, &options).await.unwrap();
+    let mut found = ids(&dataset).await;
+    found.sort_unstable();
+    assert_eq!(found, [0, 1, 3, 4, 5]);
+}

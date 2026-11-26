@@ -17,7 +17,7 @@
   <a href="https://github.com/robinskil/lance-nd/actions/workflows/ci.yml"><img src="https://github.com/robinskil/lance-nd/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue" alt="License: Apache-2.0"></a>
   <img src="https://img.shields.io/badge/rust-1.91%2B-orange?logo=rust" alt="Rust 1.91+">
-  <img src="https://img.shields.io/badge/lance-11-1E3A8A" alt="Lance 11">
+  <img src="https://img.shields.io/badge/lance-14-1E3A8A" alt="Lance 14">
   <img src="https://img.shields.io/badge/arrow-58-1E3A8A" alt="Arrow 58">
 </p>
 
@@ -120,12 +120,20 @@ cargo test --release --test scale -- --ignored --nocapture
 cargo test --release --test perf -- --ignored --nocapture --test-threads 1
 ```
 
-The `perf` tests time a widen and an append against the number of
-variables, and measure the memory of a writer. Environment variables such
+The `perf` tests time a widen, an append, a sparse write and a compaction
+against the number of variables, and measure the memory of a writer. Environment variables such
 as `LANCE_ND_WIDTHS` and `LANCE_ND_FILES` set the sizes, see the top of
 `tests/perf.rs`.
 
 ## Status
 
 lance-nd is experimental. It has no indexes. A table is a `lance::Dataset`,
-so a new major version of Lance is a breaking change of lance-nd.
+so a new major version of Lance is a breaking change of the Rust API.
+
+lance-nd 0.3 uses Lance 14. It reads and changes the tables of lance-nd 0.2,
+and lance-nd 0.2 reads and changes the tables of 0.3.
+
+For a table with many variables, where each row has only some of them, use
+the cluster mode of compaction (`CompactOptions::cluster`). It merges
+fragments with similar variables from anywhere in the table, so fragments
+stay narrow and compaction stays fast. It does not keep the row order.

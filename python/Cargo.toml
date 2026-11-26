@@ -16,7 +16,7 @@ arrow = { version = "58", default-features = false, features = ["pyarrow"] }
 futures = "0.3"
 lance-nd = { path = "..", features = ["aws", "azure", "gcp"] }
 tokio = { version = "1", features = ["rt-multi-thread"] }
-lance = { version = "11", default-features = false }
-lance-datafusion = "11"
+lance = { version = "14", default-features = false }
+lance-datafusion = "14"
 nd-arrow-array = "0.5"
 pyo3 = { version = "0.28", features = ["abi3-py310"] }

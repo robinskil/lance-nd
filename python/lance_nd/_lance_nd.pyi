@@ -157,6 +157,7 @@ class Table:
         self,
         target_fragment_bytes: int | None = None,
         deleted_fraction: float | None = None,
+        cluster: bool = False,
     ) -> dict[str, int]:
         """Merge small fragments, split large fragments and remove deleted datasets.
 
@@ -164,7 +165,9 @@ class Table:
         A fragment below half the target is merged with its small neighbors.
         A fragment above twice the target is split. A fragment with at least
         ``deleted_fraction`` deleted datasets (default 0.1) is written again
-        without them. Returns the counts ``fragments_removed``,
+        without them. With ``cluster``, fragments with similar variables merge
+        from anywhere in the table, so the new fragments hold few columns and
+        the datasets do not keep their order. Returns the counts ``fragments_removed``,
         ``fragments_added``, ``files_removed`` and ``files_added``.
         """
 

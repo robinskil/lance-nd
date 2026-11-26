@@ -4,6 +4,7 @@
 //! variable and an optional `__global_attrs__` column. Each row is one
 //! [`NdRecordBatch`].
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use arrow::array::{Array, ArrayRef, AsArray, RecordBatch, RecordBatchOptions, StructArray};
@@ -25,6 +26,7 @@ use crate::stats::{STATS_PREFIX, is_stats_name};
 /// variable has a null in its column. One variable must have one value type.
 pub fn encode_rows(rows: &[NdRecordBatch]) -> Result<RecordBatch> {
     let mut variables: Vec<FieldRef> = Vec::new();
+    let mut seen: HashMap<&str, usize> = HashMap::new();
     for field in rows.iter().flat_map(|r| r.schema().fields().iter()) {
         if field.name() == GLOBAL_ATTRIBUTES_FIELD || is_stats_name(field.name()) {
             return Err(Error::SchemaMismatch(format!(
@@ -32,7 +34,7 @@ pub fn encode_rows(rows: &[NdRecordBatch]) -> Result<RecordBatch> {
                 field.name()
             )));
         }
-        match variables.iter().find(|v| v.name() == field.name()) {
+        match seen.get(field.name().as_str()).map(|&at| &variables[at]) {
             Some(existing) if existing.data_type() != field.data_type() => {
                 return Err(Error::SchemaMismatch(format!(
                     "variable '{}' has value types {} and {}",
@@ -42,7 +44,10 @@ pub fn encode_rows(rows: &[NdRecordBatch]) -> Result<RecordBatch> {
                 )));
             }
             Some(_) => {}
-            None => variables.push(field.clone()),
+            None => {
+                seen.insert(field.name(), variables.len());
+                variables.push(field.clone());
+            }
         }
     }
 

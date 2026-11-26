@@ -9,16 +9,9 @@ use arrow::array::{
 };
 use arrow::buffer::{NullBuffer, OffsetBuffer};
 use arrow::compute::{concat, is_null, kernels::zip::zip};
-use arrow::datatypes::{DataType, Field, FieldRef, Fields, Schema, SchemaRef};
+use arrow::datatypes::{DataType, Field, FieldRef, Fields, SchemaRef};
 
 use crate::error::{Error, Result};
-
-/// The union of two schemas. Fields of `base` keep their order, nullability
-/// and metadata. Struct fields merge their children by name.
-pub fn merge_schemas(base: &Schema, other: &Schema) -> Result<Schema> {
-    let fields = merge_children(base.fields(), other.fields(), "")?;
-    Ok(Schema::new_with_metadata(fields, base.metadata().clone()))
-}
 
 fn merge_children(base: &Fields, other: &Fields, parent: &str) -> Result<Fields> {
     let mut fields = base
@@ -40,7 +33,7 @@ fn merge_children(base: &Fields, other: &Fields, parent: &str) -> Result<Fields>
 }
 
 /// Merge two fields with the same name. `path` is the dotted name for errors.
-fn merge_field(base: &Field, other: &Field, path: &str) -> Result<Field> {
+pub(crate) fn merge_field(base: &Field, other: &Field, path: &str) -> Result<Field> {
     let data_type = match (base.data_type(), other.data_type()) {
         (a, b) if a == b => return Ok(base.clone()),
         (DataType::Struct(a), DataType::Struct(b)) => {
@@ -56,33 +49,6 @@ fn merge_field(base: &Field, other: &Field, path: &str) -> Result<Field> {
         }
     };
     Ok(base.clone().with_data_type(data_type))
-}
-
-/// The fields of `merged` that `existing` lacks. A struct that exists but
-/// lacks children gives a struct with only the missing children.
-pub fn missing_fields(existing: &Fields, merged: &Fields) -> Vec<FieldRef> {
-    merged
-        .iter()
-        .filter_map(|field| {
-            let Some((_, current)) = existing.find(field.name()) else {
-                return Some(field.clone());
-            };
-            match (current.data_type(), field.data_type()) {
-                (DataType::Struct(current), DataType::Struct(children)) => {
-                    let missing = missing_fields(current, children);
-                    (!missing.is_empty()).then(|| {
-                        Arc::new(
-                            field
-                                .as_ref()
-                                .clone()
-                                .with_data_type(DataType::Struct(missing.into())),
-                        )
-                    })
-                }
-                _ => None,
-            }
-        })
-        .collect()
 }
 
 /// Shape `batch` to `schema`: reorder fields by name and fill missing
@@ -201,34 +167,9 @@ fn concat_parts(field: &Field, parts: &[Part]) -> Result<ArrayRef> {
     })
 }
 
-/// The top-level fields of `staged` that `schemas` use, in the order of
-/// `staged`. A struct keeps all its children: Lance 11 cannot read a
-/// fragment whose struct has fewer children than the table.
-pub fn used_fields(staged: &Schema, schemas: &[SchemaRef]) -> Schema {
-    let fields: Vec<FieldRef> = staged
-        .fields()
-        .iter()
-        .filter(|field| {
-            schemas
-                .iter()
-                .any(|schema| schema.column_with_name(field.name()).is_some())
-        })
-        .cloned()
-        .collect();
-    Schema::new_with_metadata(fields, staged.metadata().clone())
-}
-
-/// `true` when `staged` has each field of `new` with the same type. A
-/// struct of `new` can have fewer children.
-pub fn holds_schema(staged: &Schema, new: &Schema) -> bool {
-    new.fields().iter().all(|field| {
-        staged
-            .field_with_name(field.name())
-            .is_ok_and(|staged| holds(staged.data_type(), field.data_type()))
-    })
-}
-
-fn holds(staged: &DataType, new: &DataType) -> bool {
+/// `true` when `staged` holds each value of `new`. A struct of `new` can
+/// have fewer children.
+pub(crate) fn holds(staged: &DataType, new: &DataType) -> bool {
     match (staged, new) {
         (DataType::Struct(staged), DataType::Struct(new)) => new.iter().all(|field| {
             staged

@@ -69,16 +69,11 @@ fn row(ids: &[usize], grid: usize, wide: bool, index: usize) -> NdRecordBatch {
         .with_attributes(Attributes::new().with("id", format!("file{index}")))
 }
 
-/// A table with `width` Float32 variables, 20 variables per row.
+/// A table with `width` Float32 variables in 4 rows that each hold all
+/// variables. Dense rows keep the setup fast at large widths.
 async fn table(uri: &str, width: usize, options: &WriteOptions) -> Dataset {
-    let rows: Vec<_> = (0..width)
-        .step_by(20)
-        .enumerate()
-        .map(|(i, first)| {
-            let ids: Vec<usize> = (first..(first + 20).min(width)).collect();
-            Ok(row(&ids, 8, false, i))
-        })
-        .collect();
+    let ids: Vec<usize> = (0..width).collect();
+    let rows: Vec<_> = (0..4).map(|i| Ok(row(&ids, 2, false, i))).collect();
     let mut writer = NdWriter::create(uri, options).await.unwrap();
     writer.write(stream::iter(rows)).await.unwrap();
     writer.finish().await.unwrap()
@@ -92,7 +87,10 @@ fn secs(duration: Duration) -> f64 {
 #[ignore = "performance check, run in release mode with --ignored"]
 async fn widen_time_against_width() {
     println!("widen: one Float32 variable to Float64, the data of the variable stays the same");
-    println!("{:>8} {:>10} {:>10}", "width", "widen s", "s/width^2");
+    println!(
+        "{:>8} {:>10} {:>10} {:>10}",
+        "width", "setup s", "widen s", "s/width^2"
+    );
     for width in widths() {
         let dir = tempfile::tempdir().unwrap();
         let uri = dir.path().join("t.lance");
@@ -100,16 +98,114 @@ async fn widen_time_against_width() {
             stats: true,
             ..Default::default()
         };
+        let setup = Instant::now();
         let mut dataset = table(uri.to_str().unwrap(), width, &options).await;
+        let setup = secs(setup.elapsed());
         let start = Instant::now();
         widen(&mut dataset, &name(0), &DataType::Float64)
             .await
             .unwrap();
         let time = start.elapsed();
         println!(
-            "{width:>8} {:>10.3} {:>10.3e}",
+            "{width:>8} {setup:>10.3} {:>10.3} {:>10.3e}",
             secs(time),
             secs(time) / (width * width) as f64
+        );
+    }
+}
+
+/// Rows of 20 variables each, `width` variables in all, no two rows alike.
+fn sparse_rows(width: usize) -> Vec<lance_nd::Result<NdRecordBatch>> {
+    (0..width)
+        .step_by(20)
+        .enumerate()
+        .map(|(i, first)| {
+            let ids: Vec<usize> = (first..(first + 20).min(width)).collect();
+            Ok(row(&ids, 8, false, i))
+        })
+        .collect()
+}
+
+/// Compact a sparse table with `width` variables, in order and in cluster
+/// mode, and time a read of one row with its own variables after it.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "performance check, run in release mode with --ignored"]
+async fn compact_time_against_width() {
+    println!("compact: a sparse table, 20 variables per row, 1 row per fragment group");
+    println!(
+        "{:>8} {:>10} {:>18} {:>18} {:>12}",
+        "width", "fragments", "ordered s / frags", "cluster s / frags", "read row s"
+    );
+    for width in widths() {
+        let mut results = Vec::new();
+        let mut read = 0.0;
+        let mut before = 0;
+        for cluster in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let uri = dir.path().join("t.lance");
+            let mut writer = NdWriter::create(uri.to_str().unwrap(), &WriteOptions::default())
+                .await
+                .unwrap();
+            writer
+                .write(stream::iter(sparse_rows(width)))
+                .await
+                .unwrap();
+            let mut dataset = writer.finish().await.unwrap();
+            before = dataset.get_fragments().len();
+            let options = lance_nd::CompactOptions {
+                cluster,
+                ..Default::default()
+            };
+            let start = Instant::now();
+            lance_nd::compact(&mut dataset, &options).await.unwrap();
+            results.push((secs(start.elapsed()), dataset.get_fragments().len()));
+            if cluster {
+                let target = width / 40;
+                let own: Vec<String> = (target * 20..target * 20 + 20).map(name).collect();
+                let own: Vec<&str> = own.iter().map(String::as_str).collect();
+                let start = Instant::now();
+                let rows: Vec<NdRecordBatch> = lance_nd::scan(&dataset)
+                    .filter(format!("__global_attrs__.id = 'file{target}'"))
+                    .project(&own)
+                    .try_collect()
+                    .await
+                    .unwrap();
+                assert_eq!(rows.len(), 1);
+                read = secs(start.elapsed());
+            }
+        }
+        println!(
+            "{width:>8} {before:>10} {:>10.3} {:>7} {:>10.3} {:>7} {read:>12.3}",
+            results[0].0, results[0].1, results[1].0, results[1].1
+        );
+    }
+}
+
+/// Time a create of a table with `width` variables, 20 variables per row.
+/// Each row holds other variables, so the table is sparse.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "performance check, run in release mode with --ignored"]
+async fn sparse_write_time_against_width() {
+    println!("write: 20 variables per row, `width` variables in the table");
+    println!(
+        "{:>8} {:>8} {:>10} {:>10}",
+        "width", "rows", "write s", "s/width^2"
+    );
+    for width in widths() {
+        let dir = tempfile::tempdir().unwrap();
+        let uri = dir.path().join("t.lance");
+        let rows = sparse_rows(width);
+        let count = rows.len();
+        let start = Instant::now();
+        let mut writer = NdWriter::create(uri.to_str().unwrap(), &WriteOptions::default())
+            .await
+            .unwrap();
+        writer.write(stream::iter(rows)).await.unwrap();
+        writer.finish().await.unwrap();
+        let time = secs(start.elapsed());
+        println!(
+            "{width:>8} {count:>8} {time:>10.3} {:>10.3e}",
+            time / (width * width) as f64
         );
     }
 }

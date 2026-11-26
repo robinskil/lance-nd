@@ -1,23 +1,26 @@
 //! Widen the value type of a variable in the table.
 //!
-//! Lance 11 cannot cast a struct column or a nested field in place, so
+//! Lance cannot cast a struct column or a nested field in place, so
 //! [`widen`] writes the variable again under new field ids and commits it in
 //! place of the old column. The stats column gets the same treatment. Only
 //! these columns are written again, not the whole table.
 //!
-//! No widen commits a Lance Merge through `CommitBuilder`: its validation
-//! takes a time that grows with the square of the schema fields.
+//! No widen commits a Lance Merge, also not through `Dataset::add_columns`:
+//! its validation takes a time that grows with the square of the schema fields.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use arrow::array::RecordBatch;
 use arrow::compute::cast;
 use arrow::datatypes::{DataType, Field, Fields, Schema, SchemaRef};
-use futures::FutureExt;
+use futures::{FutureExt, StreamExt, TryStreamExt, stream};
 use lance::Dataset;
 use lance::dataset::transaction::{Operation, Transaction};
 use lance::dataset::{BatchUDF, CommitBuilder, NewColumnTransform};
+use lance::table::format::Fragment;
 use lance_core::datatypes::{Field as LanceField, Schema as LanceSchema, format_field_path};
+use lance_core::utils::tokio::get_num_compute_intensive_cpus;
 use nd_arrow_array::extension::{VALUES_FIELD, is_nd_field};
 
 use crate::cast::{Casting, allowed, promote_type};
@@ -35,7 +38,7 @@ const TEMPORARY_PREFIX: &str = "__stats__widen__";
 ///
 /// `to` must hold each old value exactly, as [`Casting::Safe`] allows. The
 /// same type does nothing. A widen writes the variable again in a new
-/// column, then swaps it in with a second Lance commit. Readers see the old
+/// column, then swaps it in. This makes three Lance versions. Readers see the old
 /// or the new type, never a mix. A concurrent commit that adds rows makes it
 /// start again, up to a limit.
 #[tracing::instrument(skip_all, fields(uri = %dataset.uri(), variable = %variable, to = %to), err)]
@@ -153,9 +156,11 @@ const MAX_ATTEMPTS: usize = 10;
 /// Write each old column of `columns` again with the type of its new field.
 ///
 /// Each fragment gets a new data file with the new columns, under new field
-/// ids. A schema commit then gives them the old names. A concurrent append or
-/// writer commit conflicts with both commits, so no row keeps a field id that
-/// the widen removes. A failed widen drops its temporary columns.
+/// ids. A schema commit adds the new columns, an Update commits the files, and
+/// a last schema commit gives the new columns the old names. A concurrent
+/// commit that adds rows conflicts with the schema commits, or leaves a
+/// fragment without the new files that the widen detects. So no row keeps a
+/// field id that the widen removes. A failed widen drops its temporary columns.
 async fn rewrite(dataset: &mut Dataset, columns: &[(Field, Field)], detached: bool) -> Result<()> {
     for attempt in 1..=MAX_ATTEMPTS {
         match rewrite_once(dataset, columns, detached).await {
@@ -212,25 +217,20 @@ async fn rewrite_once(
 
     if !detached {
         drop_temporary(dataset).await?;
-        // A Merge that skips the quadratic validation of CommitBuilder.
-        dataset
-            .add_columns(udf(), Some(paths), None)
-            .boxed()
-            .await?;
-        let schema = swap_leaves(dataset.schema().clone(), &old)?;
-        return commit_schema(dataset, schema, false).await;
     }
-
-    // No concurrent commits on a detached version, so an Update adds the files.
-    let mut fragments = Vec::new();
-    let mut schema = None;
-    for fragment in dataset.get_fragments() {
-        let (fragment, fragment_schema) = fragment
-            .add_columns(udf(), Some(paths.clone()), None)
-            .await?;
-        fragments.push(fragment);
-        schema = Some(fragment_schema);
-    }
+    let rewritten: Vec<_> = stream::iter(dataset.get_fragments())
+        .map(|fragment| {
+            let (transform, paths) = (udf(), paths.clone());
+            async move { fragment.add_columns(transform, Some(paths), None).await }
+        })
+        .buffered(get_num_compute_intensive_cpus())
+        .try_collect()
+        .await?;
+    let schema = rewritten.last().map(|(_, schema)| schema.clone());
+    let fragments: Vec<Fragment> = rewritten
+        .into_iter()
+        .map(|(fragment, _)| fragment)
+        .collect();
     // Without fragments, only the schema changes. Lance gives new fields the
     // ids after the highest id, as add_columns does.
     let schema = match schema {
@@ -241,25 +241,75 @@ async fn rewrite_once(
             schema
         }
     };
-    let schema = swap_leaves(schema, &old)?;
     if !fragments.is_empty() {
-        let operation = Operation::Update {
-            removed_fragment_ids: Vec::new(),
-            updated_fragments: fragments,
-            new_fragments: Vec::new(),
-            fields_modified: Vec::new(),
-            compacted_sstables: Vec::new(),
-            fields_for_preserving_frag_bitmap: Vec::new(),
-            update_mode: None,
-            inserted_rows_filter: None,
-            updated_fragment_offsets: None,
-        };
-        *dataset = CommitBuilder::new(Arc::new(dataset.clone()))
-            .with_detached(true)
-            .execute(Transaction::new(dataset.version().version, operation, None))
-            .await?;
+        // An Update drops the files of fields that are not in the schema.
+        commit_schema(dataset, schema.clone(), detached).await?;
+        commit_files(dataset, fragments, detached).await?;
+        if !detached {
+            check_rewritten(dataset, &schema)?;
+        }
     }
-    commit_schema(dataset, schema, true).await
+    commit_schema(dataset, swap_leaves(schema, &old)?, detached).await
+}
+
+/// Commit the new data files of `fragments` with a Lance Update.
+async fn commit_files(
+    dataset: &mut Dataset,
+    fragments: Vec<Fragment>,
+    detached: bool,
+) -> Result<()> {
+    let operation = Operation::Update {
+        removed_fragment_ids: Vec::new(),
+        updated_fragments: fragments,
+        new_fragments: Vec::new(),
+        fields_modified: Vec::new(),
+        compacted_sstables: Vec::new(),
+        fields_for_preserving_frag_bitmap: Vec::new(),
+        update_mode: None,
+        inserted_rows_filter: None,
+        updated_fragment_offsets: None,
+    };
+    *dataset = CommitBuilder::new(Arc::new(dataset.clone()))
+        .with_detached(detached)
+        .execute(Transaction::new(dataset.version().version, operation, None))
+        .await?;
+    Ok(())
+}
+
+/// Fail with a retryable conflict when a fragment has no file with the
+/// temporary columns of `schema`. An append between the two first commits
+/// of a widen adds such a fragment, and the swap would lose its values.
+fn check_rewritten(dataset: &Dataset, schema: &LanceSchema) -> Result<()> {
+    fn collect_ids(field: &LanceField, ids: &mut HashSet<i32>) {
+        ids.insert(field.id);
+        field
+            .children
+            .iter()
+            .for_each(|child| collect_ids(child, ids));
+    }
+    let mut temporary = HashSet::new();
+    for field in &schema.fields {
+        if field.name.starts_with(TEMPORARY_PREFIX) {
+            collect_ids(field, &mut temporary);
+        }
+    }
+    let missed = dataset.get_fragments().into_iter().find(|fragment| {
+        !fragment
+            .metadata()
+            .files
+            .iter()
+            .any(|file| file.fields.iter().any(|id| temporary.contains(id)))
+    });
+    match missed {
+        None => Ok(()),
+        Some(fragment) => Err(Error::CommitConflict {
+            retryable: true,
+            source: Box::new(lance::Error::retryable_commit_conflict_source(
+                dataset.version().version,
+                format!("fragment {} was added during the widen", fragment.id()).into(),
+            )),
+        }),
+    }
 }
 
 /// Drop the temporary columns of a widen that did not finish.

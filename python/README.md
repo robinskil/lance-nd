@@ -65,6 +65,10 @@ for batch in table.scan(filter="__global_attrs__.title = 'a'", prune="sst.values
 
 # Give a variable a wider type. Only its column and its stats are written again.
 table.widen("sst", pa.float64())
+
+# Merge fragments with similar variables. Fast for sparse, wide tables.
+# The rows do not keep their order.
+table.compact(cluster=True)
 ```
 
 ## Command line

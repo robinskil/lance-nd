@@ -1,18 +1,18 @@
 //! Write nd record batches in several calls and commit them once.
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::pin::pin;
 use std::sync::Arc;
 
 use arrow::array::{RecordBatch, RecordBatchIterator};
-use arrow::datatypes::{FieldRef, Schema, SchemaRef};
-use futures::{FutureExt, Stream};
+use arrow::datatypes::{FieldRef, Schema};
+use futures::{FutureExt, Stream, StreamExt, TryStreamExt, stream};
 use lance::Dataset;
 use lance::dataset::fragment::write::FragmentCreateBuilder;
 use lance::dataset::transaction::{Operation, Transaction};
-use lance::dataset::{CommitBuilder, NewColumnTransform, WriteMode as LanceWriteMode, WriteParams};
+use lance::dataset::{CommitBuilder, WriteMode as LanceWriteMode, WriteParams};
 use lance::table::format::Fragment;
-use lance_core::datatypes::{OnMissing, OnTypeMismatch, Schema as LanceSchema};
+use lance_core::datatypes::Schema as LanceSchema;
 use nd_arrow_array::NdRecordBatch;
 use nd_arrow_array::extension::{GLOBAL_ATTRIBUTES_FIELD, is_global_attributes_field};
 use tokio::task::JoinHandle;
@@ -22,7 +22,7 @@ use crate::encode::{RowDecoder, encode_rows};
 use crate::error::{Error, Result};
 use crate::format::check_format;
 use crate::options::ColumnOptions;
-use crate::schema::{concat_conformed, holds_schema, merge_schemas, missing_fields, used_fields};
+use crate::schema::{concat_conformed, holds, merge_field};
 use crate::stats::{STATS_PREFIX, is_stats_name};
 use crate::store::{StorageOptions, open_dataset, store_params};
 use crate::widen::{commit_schema, promotions, widen_all};
@@ -35,9 +35,10 @@ use crate::write::{
 ///
 /// [`NdWriter::write`] buffers rows. When the buffer has about
 /// [`WriteOptions::target_fragment_bytes`] on disk, as estimated from the
-/// fragments written so far, a Tokio task writes it as one
-/// Lance fragment, and up to [`WriteOptions::write_parallelism`] fragments
-/// are written at the same time. Readers do not see the fragments.
+/// fragments written so far, a Tokio task writes it as Lance fragments:
+/// one per run of rows with similar variables, each with only the columns
+/// of its rows. Up to [`WriteOptions::write_parallelism`] tasks run at the
+/// same time. Readers do not see the fragments.
 /// [`NdWriter::finish`] writes the rest and commits all of them in one new
 /// table version, in the order of the rows. The writer must run on a Tokio
 /// runtime.
@@ -66,8 +67,11 @@ pub struct NdWriter {
     /// `true` when the rows get stats.
     stats: bool,
     options: WriteOptions,
-    /// The table schema with all staged fields, as Arrow and as Lance.
+    /// The table schema with all staged fields, as Arrow and as Lance, with
+    /// the fields in the same order.
     schema: Option<(Schema, LanceSchema)>,
+    /// The position of each top-level field of `schema`, by name.
+    index: HashMap<String, usize>,
     /// Rows for the next fragment, and their size in memory.
     buffer: Vec<RecordBatch>,
     buffered_bytes: usize,
@@ -112,6 +116,7 @@ impl NdWriter {
             stats: options.stats,
             options: options.clone(),
             schema: None,
+            index: HashMap::new(),
             buffer: Vec::new(),
             buffered_bytes: 0,
             pending: VecDeque::new(),
@@ -132,6 +137,7 @@ impl NdWriter {
         let defaults = table_defaults(&dataset, options)?;
         let stats = table_has_stats(&dataset);
         let schema = (Schema::from(dataset.schema()), dataset.schema().clone());
+        let index = name_index(&schema.0);
         Ok(Self {
             uri: uri.to_string(),
             start_version: Some(dataset.version().version),
@@ -142,6 +148,7 @@ impl NdWriter {
             stats,
             options: options.clone(),
             schema: Some(schema),
+            index,
             buffer: Vec::new(),
             buffered_bytes: 0,
             pending: VecDeque::new(),
@@ -162,13 +169,51 @@ impl NdWriter {
         self.check()?;
         let mut rows = pin!(rows);
         while let Some(group) = next_group(&mut rows, &self.options).await? {
-            let batch = encode_rows(&group)?;
-            self.promote(&batch).await?;
-            let table = self.schema.as_ref().map(|(arrow, _)| arrow);
-            let batch = prepare_batch(batch, &self.defaults, &self.options, self.stats, table)?;
-            self.push(batch).await?;
+            // One batch per run of rows with the same variables: a batch of
+            // the union of all variables costs a column for each variable.
+            let batches = runs(&group)
+                .into_iter()
+                .map(encode_rows)
+                .collect::<Result<Vec<_>>>()?;
+            for batch in &batches {
+                self.promote(batch).await?;
+            }
+            let batches = batches
+                .into_iter()
+                .map(|batch| {
+                    let table = self.staged_view(&batch.schema());
+                    prepare_batch(
+                        batch,
+                        &self.defaults,
+                        &self.options,
+                        self.stats,
+                        table.as_ref(),
+                    )
+                })
+                .collect::<Result<Vec<_>>>()?;
+            self.push(batches).await?;
         }
         Ok(())
+    }
+
+    /// The staged fields that `schema` names, or `None` before the first
+    /// row. A lookup by name in the full schema takes a time linear in its
+    /// fields.
+    fn staged_view(&self, schema: &Schema) -> Option<Schema> {
+        let (arrow, _) = self.schema.as_ref()?;
+        let fields: Vec<FieldRef> = schema
+            .fields()
+            .iter()
+            .filter_map(|field| self.index.get(field.name()))
+            .map(|&position| arrow.fields()[position].clone())
+            .collect();
+        Some(Schema::new_with_metadata(fields, arrow.metadata().clone()))
+    }
+
+    /// Set the staged schema and its index.
+    fn set_schema(&mut self, arrow: Schema, lance: LanceSchema) {
+        self.index = name_index(&arrow);
+        self.schema = Some((arrow, lance));
     }
 
     /// Write the rows of an encoded record batch, without a commit.
@@ -215,9 +260,15 @@ impl NdWriter {
         }
         let batch = nullable_global_attributes(batch)?;
         self.promote(&batch).await?;
-        let table = self.schema.as_ref().map(|(arrow, _)| arrow);
-        let batch = prepare_batch(batch, &self.defaults, &self.options, self.stats, table)?;
-        self.push(batch).await
+        let table = self.staged_view(&batch.schema());
+        let batch = prepare_batch(
+            batch,
+            &self.defaults,
+            &self.options,
+            self.stats,
+            table.as_ref(),
+        )?;
+        self.push(vec![batch]).await
     }
 
     /// Widen the variables of `batch` in the table as [`Casting::Promote`]
@@ -227,10 +278,10 @@ impl NdWriter {
         if self.options.casting != Casting::Promote {
             return Ok(());
         }
-        let Some((arrow, _)) = &self.schema else {
+        let Some(table) = self.staged_view(&batch.schema()) else {
             return Ok(());
         };
-        let widenings = promotions(batch, arrow);
+        let widenings = promotions(batch, &table);
         if widenings.is_empty() {
             return Ok(());
         }
@@ -251,46 +302,112 @@ impl NdWriter {
             widen_all(dataset, &widenings, self.detached)
                 .boxed()
                 .await?;
-            self.schema = Some((Schema::from(dataset.schema()), dataset.schema().clone()));
+            let schema = (Schema::from(dataset.schema()), dataset.schema().clone());
+            self.set_schema(schema.0, schema.1);
             Ok(())
         }
         .await;
         self.fail_on(result)
     }
 
-    /// Grow the staged schema with `batch`, then buffer it. A full buffer
-    /// becomes a fragment.
+    /// Grow the staged schema with `batches`, then buffer them. A full
+    /// buffer becomes fragments.
     ///
-    /// A schema conflict changes nothing, so it only rejects `batch`. A
+    /// A schema conflict changes nothing, so it only rejects `batches`. A
     /// failed fragment write makes the writer fail.
-    async fn push(&mut self, batch: RecordBatch) -> Result<()> {
-        // Most rows bring no new field. A merge copies the full staged
-        // schema, which is slow with thousands of variables.
-        let grows = match &self.schema {
-            Some((arrow, _)) => !holds_schema(arrow, &batch.schema()),
-            None => true,
-        };
-        if grows {
-            let (arrow, lance) = match &self.schema {
-                Some((arrow, lance)) => (
-                    merge_schemas(arrow, &batch.schema())?,
-                    lance.merge(batch.schema().as_ref())?,
-                ),
-                None => (
-                    batch.schema().as_ref().clone(),
-                    LanceSchema::try_from(batch.schema().as_ref())?,
-                ),
+    async fn push(&mut self, batches: Vec<RecordBatch>) -> Result<()> {
+        self.grow(&batches)?;
+        for batch in batches {
+            self.buffered_bytes += batch.get_array_memory_size();
+            self.buffer.push(batch);
+            if self.written.on_disk(self.buffered_bytes)
+                >= self.options.target_fragment_bytes as f64
+            {
+                let result = self.flush().boxed().await;
+                self.fail_on(result)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Add the fields of `batches` that the staged schema lacks. The time is
+    /// linear in the fields of `batches`, plus one copy of the field list
+    /// when the schema grows. A conflict changes nothing.
+    fn grow(&mut self, batches: &[RecordBatch]) -> Result<()> {
+        if self.schema.is_none() {
+            let Some((first, rest)) = batches.split_first() else {
+                return Ok(());
             };
-            let mut lance = lance;
-            lance.set_field_id(self.base_max_field_id());
-            self.schema = Some((arrow, lance));
+            let arrow = first.schema().as_ref().clone();
+            let lance = LanceSchema::try_from(&arrow)?;
+            self.set_schema(arrow, lance);
+            return self.grow(rest);
         }
-        self.buffered_bytes += batch.get_array_memory_size();
-        self.buffer.push(batch);
-        if self.written.on_disk(self.buffered_bytes) >= self.options.target_fragment_bytes as f64 {
-            let result = self.flush().boxed().await;
-            return self.fail_on(result);
+        let (arrow, lance) = self.schema.as_ref().expect("a staged schema");
+        // New top-level fields, and merged versions of staged fields.
+        let mut added: Vec<FieldRef> = Vec::new();
+        let mut added_at: HashMap<String, usize> = HashMap::new();
+        let mut changed: HashMap<usize, FieldRef> = HashMap::new();
+        for batch in batches {
+            for field in batch.schema().fields() {
+                let name = field.name();
+                if let Some(&at) = added_at.get(name) {
+                    if !holds(added[at].data_type(), field.data_type()) {
+                        added[at] = Arc::new(merge_field(&added[at], field, name)?);
+                    }
+                } else if let Some(&position) = self.index.get(name) {
+                    let current = changed.get(&position).unwrap_or(&arrow.fields()[position]);
+                    if !holds(current.data_type(), field.data_type()) {
+                        let merged = Arc::new(merge_field(current, field, name)?);
+                        changed.insert(position, merged);
+                    }
+                } else {
+                    added_at.insert(name.clone(), added.len());
+                    added.push(field.clone());
+                }
+            }
         }
+        if added.is_empty() && changed.is_empty() {
+            return Ok(());
+        }
+        // All fallible steps first, so that a conflict changes nothing.
+        // A merge leaves the new fields without ids, which set_field_id assigns.
+        let added_lance = LanceSchema {
+            fields: Vec::new(),
+            metadata: Default::default(),
+        }
+        .merge(&Schema::new(added.clone()))?;
+        let changed_lance = changed
+            .iter()
+            .map(|(&position, field)| {
+                let current = LanceSchema {
+                    fields: vec![lance.fields[position].clone()],
+                    metadata: Default::default(),
+                };
+                let merged = current.merge(&Schema::new(vec![field.clone()]))?;
+                let field = merged.fields.into_iter().next().expect("one field");
+                Ok((position, field))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let mut fields: Vec<FieldRef> = arrow.fields().iter().cloned().collect();
+        for (&position, field) in &changed {
+            fields[position] = field.clone();
+        }
+        let first_added = fields.len();
+        fields.extend(added.iter().cloned());
+        let arrow = Schema::new_with_metadata(fields, arrow.metadata().clone());
+        let max_field_id = self.base_max_field_id();
+        let (_, mut lance) = self.schema.take().expect("a staged schema");
+        for (position, field) in changed_lance {
+            lance.fields[position] = field;
+        }
+        lance.fields.extend(added_lance.fields);
+        lance.set_field_id(max_field_id);
+        for (offset, field) in added.iter().enumerate() {
+            self.index
+                .insert(field.name().clone(), first_added + offset);
+        }
+        self.schema = Some((arrow, lance));
         Ok(())
     }
 
@@ -304,23 +421,34 @@ impl NdWriter {
         self.evolve().await?;
         let batches = std::mem::take(&mut self.buffer);
         let memory = std::mem::take(&mut self.buffered_bytes);
-        let (arrow, lance) = self.schema.as_ref().expect("a buffered row has a schema");
-        // Only the columns of the buffered rows: the other columns read as
-        // null. Rows of one buffer often share a schema.
-        let schemas: Vec<SchemaRef> = batches
-            .iter()
-            .map(|batch| batch.schema())
-            .collect::<HashSet<_>>()
-            .into_iter()
-            .collect();
-        let present = Arc::new(used_fields(arrow, &schemas));
-        // One batch per fragment: Lance 11 fails to read back a fragment of
-        // several batches when a struct column has nulls and large lists.
-        let batch = concat_conformed(&present, &batches)?;
-        let projected =
-            lance.project_by_schema(present.as_ref(), OnMissing::Error, OnTypeMismatch::Error)?;
+        // One fragment per cluster of similar rows, each with only the
+        // columns of its rows: the other columns read as null.
+        let mut writes = Vec::new();
+        for cluster in clusters(batches) {
+            let positions = self.positions(&cluster)?;
+            let (arrow, lance) = self.schema.as_ref().expect("a buffered row has a schema");
+            let fields: Vec<FieldRef> = positions
+                .iter()
+                .map(|&position| arrow.fields()[position].clone())
+                .collect();
+            let present = Arc::new(Schema::new_with_metadata(fields, arrow.metadata().clone()));
+            // A struct keeps all its children: Lance 11 cannot read a
+            // fragment whose struct has fewer children than the table.
+            let projected = LanceSchema {
+                fields: positions
+                    .iter()
+                    .map(|&position| lance.fields[position].clone())
+                    .collect(),
+                metadata: lance.metadata.clone(),
+            };
+            // One batch per fragment: Lance 11 fails to read back a fragment of
+            // several batches when a struct column has nulls and large lists.
+            let batch = concat_conformed(&present, &cluster)?;
+            writes.push((batch, present, projected));
+        }
         let uri = self.uri.clone();
         let store_params = store_params(&self.options.storage_options);
+        let parallelism = self.options.write_parallelism.max(1);
         let task = tokio::spawn(async move {
             let params = WriteParams {
                 mode: LanceWriteMode::Append,
@@ -328,12 +456,22 @@ impl NdWriter {
                 store_params,
                 ..Default::default()
             };
-            let reader = RecordBatchIterator::new([Ok(batch)], present);
-            Ok(FragmentCreateBuilder::new(&uri)
-                .schema(&projected)
-                .write_params(&params)
-                .write_fragments(reader)
-                .await?)
+            let written: Vec<Vec<Fragment>> = stream::iter(writes)
+                .map(|(batch, present, projected)| {
+                    let (uri, params) = (uri.clone(), params.clone());
+                    async move {
+                        let reader = RecordBatchIterator::new([Ok(batch)], present);
+                        FragmentCreateBuilder::new(&uri)
+                            .schema(&projected)
+                            .write_params(&params)
+                            .write_fragments(reader)
+                            .await
+                    }
+                })
+                .buffered(parallelism)
+                .try_collect()
+                .await?;
+            Ok(written.into_iter().flatten().collect())
         });
         self.pending.push_back((task, memory));
         while self.pending.len() > self.options.write_parallelism.max(1) {
@@ -342,36 +480,45 @@ impl NdWriter {
         Ok(())
     }
 
-    /// Add the staged fields that the table lacks to the table, as all-null
-    /// columns, and take the field ids of the table. Fragments then always
-    /// use the ids of the table.
+    /// The positions in the staged schema of the columns of `batches`, in
+    /// the order of the staged schema.
+    fn positions(&self, batches: &[RecordBatch]) -> Result<Vec<usize>> {
+        let mut positions = HashSet::new();
+        for batch in batches {
+            for field in batch.schema().fields() {
+                let position = self.index.get(field.name()).ok_or_else(|| {
+                    Error::InvalidTable(format!("no staged field '{}'", field.name()))
+                })?;
+                positions.insert(*position);
+            }
+        }
+        let mut positions: Vec<usize> = positions.into_iter().collect();
+        positions.sort_unstable();
+        Ok(positions)
+    }
+
+    /// Add the staged fields that the table lacks to the table, and take the
+    /// field ids of the table. Fragments then always use the ids of the table.
     ///
-    /// Lance validates a Merge commit in a time that grows with the square of
-    /// the schema fields, which takes minutes with thousands of variables.
-    /// `add_columns` skips that validation.
+    /// A Project commit adds the fields: Lance validates a Merge commit, also
+    /// that of `add_columns`, in a time that grows with the square of the
+    /// schema fields.
     async fn evolve(&mut self) -> Result<()> {
-        let (Some(base), Some((arrow, _))) = (self.base.as_mut(), self.schema.as_ref()) else {
+        let (Some(base), Some((_, lance))) = (self.base.as_mut(), self.schema.as_ref()) else {
             return Ok(());
         };
-        // add_columns commits a table version, which a detached write must not
+        // A commit makes a table version, which a detached write must not
         // do. The final commit then adds the new fields.
         if self.overwrite || self.detached {
             return Ok(());
         }
-        let missing = missing_fields(Schema::from(base.schema()).fields(), arrow.fields());
-        if missing.is_empty() {
+        // New fields, also new struct children, get ids above those of the table.
+        if lance.max_field_id() <= base.schema().max_field_id() {
             return Ok(());
         }
-        // Boxed: the add_columns future is large, and would grow the future
-        // of each write beyond the compiler's layout depth.
-        base.add_columns(
-            NewColumnTransform::AllNulls(Arc::new(Schema::new(missing))),
-            None,
-            None,
-        )
-        .boxed()
-        .await?;
-        self.schema = Some((Schema::from(base.schema()), base.schema().clone()));
+        commit_schema(base, lance.clone(), false).boxed().await?;
+        let schema = (Schema::from(base.schema()), base.schema().clone());
+        self.set_schema(schema.0, schema.1);
         Ok(())
     }
 
@@ -473,7 +620,7 @@ impl NdWriter {
         tracing::info!(version = dataset.version().version, "committed the rows");
         self.base = Some(dataset.clone());
         self.overwrite = false;
-        self.schema = Some((Schema::from(dataset.schema()), dataset.schema().clone()));
+        self.set_schema(Schema::from(dataset.schema()), dataset.schema().clone());
         Ok(dataset)
     }
 
@@ -489,6 +636,63 @@ impl Drop for NdWriter {
             task.abort();
         }
     }
+}
+
+/// The position of each top-level field of `schema`, by name.
+fn name_index(schema: &Schema) -> HashMap<String, usize> {
+    schema
+        .fields()
+        .iter()
+        .enumerate()
+        .map(|(position, field)| (field.name().clone(), position))
+        .collect()
+}
+
+/// `rows` split into runs of consecutive rows with the same variables, in
+/// the order of the rows.
+fn runs(rows: &[NdRecordBatch]) -> Vec<&[NdRecordBatch]> {
+    let mut runs = Vec::new();
+    let mut start = 0;
+    for end in 1..=rows.len() {
+        if end == rows.len() || rows[end].schema() != rows[start].schema() {
+            runs.push(&rows[start..end]);
+            start = end;
+        }
+    }
+    runs
+}
+
+/// The most columns of a fragment, as a multiple of its widest batch. A
+/// fragment then holds at most this many absent values per value.
+const CLUSTER_WIDTH: usize = 4;
+
+/// The columns that a fragment can always hold, also with narrow batches.
+const CLUSTER_MIN_COLUMNS: usize = 64;
+
+/// `batches` split into runs of consecutive batches whose union of columns
+/// stays at most [`CLUSTER_WIDTH`] times their widest batch, in order.
+fn clusters(batches: Vec<RecordBatch>) -> Vec<Vec<RecordBatch>> {
+    let mut clusters: Vec<Vec<RecordBatch>> = Vec::new();
+    let mut names: HashSet<String> = HashSet::new();
+    let mut widest = 0;
+    for batch in batches {
+        let schema = batch.schema();
+        let new = schema
+            .fields()
+            .iter()
+            .filter(|field| !names.contains(field.name()))
+            .count();
+        let limit = (CLUSTER_WIDTH * widest.max(batch.num_columns())).max(CLUSTER_MIN_COLUMNS);
+        if clusters.is_empty() || names.len() + new > limit {
+            clusters.push(Vec::new());
+            names.clear();
+            widest = 0;
+        }
+        names.extend(schema.fields().iter().map(|field| field.name().clone()));
+        widest = widest.max(batch.num_columns());
+        clusters.last_mut().expect("a cluster").push(batch);
+    }
+    clusters
 }
 
 /// `batch` with a nullable `__global_attrs__` field, as [`crate::encode_rows`]

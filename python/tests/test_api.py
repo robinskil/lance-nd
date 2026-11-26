@@ -195,6 +195,21 @@ def test_compact_and_cleanup(table_uri):
     assert lance_nd.open(table_uri).count_rows() == 3
 
 
+def test_compact_cluster_keeps_the_datasets(table_uri):
+    with lance_nd.create(table_uri, target_fragment_bytes=1) as writer:
+        for title in "abcd":
+            writer.write(dataset(title))
+    table = lance_nd.open(table_uri)
+    table.delete("__global_attrs__.title = 'b'")
+    metrics = table.compact(cluster=True)
+    assert metrics["fragments_removed"] == 3
+    assert table.num_fragments == 1
+    titles = sorted(
+        batch.to_xarray().attrs["title"] for batch in table.scan()
+    )
+    assert titles == ["a", "c", "d"]
+
+
 def sst_dataset(title, values):
     return xr.Dataset(
         {"sst": (("time",), np.array(values), {"units": "K"})},

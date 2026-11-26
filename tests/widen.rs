@@ -350,9 +350,9 @@ mod promote {
         writer.write(stream::iter([Ok(narrow)])).await.unwrap();
         writer.write(stream::iter([Ok(wide)])).await.unwrap();
         let dataset = writer.finish().await.unwrap();
-        // Version 1 has the first row, versions 2 and 3 widen v and w, and
-        // version 4 has the second row.
-        assert_eq!(dataset.version().version, 4);
+        // Version 1 has the first row, versions 2 to 4 widen v and w, and
+        // version 5 has the second row.
+        assert_eq!(dataset.version().version, 5);
         for variable in ["v", "w"] {
             assert_eq!(value_type(&dataset, variable), DataType::Float64);
             assert_eq!(stats_type(&dataset, variable), DataType::Float64);
@@ -552,7 +552,7 @@ mod promote {
                 .await
                 .unwrap();
             let dataset = writer.finish().await.unwrap();
-            assert_eq!(dataset.version().version, 4);
+            assert_eq!(dataset.version().version, 5);
             assert_eq!(v_values(&dataset).await, [Some(vec![1.5]), Some(vec![0.1])]);
         }
     }
@@ -638,9 +638,10 @@ async fn widen_with_concurrent_appends_loses_no_values() {
                 tokio::spawn(async move {
                     let mut committed = Vec::new();
                     let mut i = 0;
-                    // A few appends after the widen too.
+                    // A few appends after the widen too. The cap stops the
+                    // appends from preempting each widen attempt.
                     let mut after = 0;
-                    while after < 3 {
+                    while after < 3 && i < 40 {
                         if done.load(Ordering::SeqCst) {
                             after += 1;
                         }

@@ -21,16 +21,16 @@ azure = ["lance/azure"]
 arrow = { version = "58", default-features = false }
 chrono = { version = "0.4", default-features = false }
 futures = "0.3"
-lance = { version = "11", default-features = false }
-lance-core = "11"
-lance-file = "11"
+lance = { version = "14", default-features = false }
+lance-core = "14"
+lance-file = "14"
 nd-arrow-array = "0.5"
 thiserror = "2"
 tokio = { version = "1", features = ["rt"] }
 tracing = "0.1"
 
 [dev-dependencies]
-object_store = "0.13"
+object_store = "0.14"
 proptest = "1"
 serde_json = "1"
 tempfile = "3"

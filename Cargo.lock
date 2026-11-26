@@ -3612,7 +3612,7 @@ dependencies = [
 
 [[package]]
 name = "lance-nd"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "arrow",
  "chrono",
@@ -3632,7 +3632,7 @@ dependencies = [
 
 [[package]]
 name = "lance-nd-python"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "arrow",
  "futures",

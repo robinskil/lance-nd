@@ -25,7 +25,7 @@ use crate::options::ColumnOptions;
 use crate::schema::{concat_conformed, holds_schema, merge_schemas, missing_fields, used_fields};
 use crate::stats::{STATS_PREFIX, is_stats_name};
 use crate::store::{StorageOptions, open_dataset, store_params};
-use crate::widen::{promotions, widen_all};
+use crate::widen::{commit_schema, promotions, widen_all};
 use crate::write::{
     FILE_VERSION, WriteMode, WriteOptions, next_group, prepare_batch, table_defaults,
     table_has_stats,
@@ -460,24 +460,13 @@ impl NdWriter {
                     .boxed()
                     .await?
             }
-            (Some(base), false) => {
-                let version = base.version().version;
-                let mut all: Vec<Fragment> = base
-                    .get_fragments()
-                    .iter()
-                    .map(|f| f.metadata().clone())
-                    .collect();
-                let first_id = base.manifest.max_fragment_id().map_or(0, |id| id + 1);
-                all.extend(numbered(fragments, first_id));
-                // New fields are nullable, so old rows read them as null.
-                let operation = Operation::Merge {
-                    fragments: all,
-                    schema,
-                    preserves_nullability: true,
-                };
-                CommitBuilder::new(Arc::new(base))
-                    .with_detached(self.detached)
-                    .execute(Transaction::new(version, operation, None))
+            // New fields of a detached write: commit the schema, then the rows.
+            (Some(mut base), false) => {
+                commit_schema(&mut base, schema.clone(), self.detached)
+                    .boxed()
+                    .await?;
+                commit_rows(base, fragments, &schema, self.detached)
+                    .boxed()
                     .await?
             }
         };

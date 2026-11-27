@@ -516,8 +516,9 @@ fn outputs(bytes: u64, rows: u64, target: u64) -> u64 {
 /// grows with the columns of the table. `manifest` is the manifest of
 /// `dataset` without its schema.
 ///
-/// Each fragment is read in steps of about [`READ_STEP_MEMORY`], as
-/// measured from the rows read before. A new fragment closes when its rows
+/// Each fragment is read in steps of at most [`READ_STEP_MEMORY`], by the
+/// sizes in [`MEMORY_COLUMN`], or one row at a time without them. A new
+/// fragment closes when its rows
 /// reach `target` in memory, also when the estimate of the plan is low.
 ///
 /// Returns `None` when the new fragments are not fewer than `fragments`. A
@@ -586,13 +587,11 @@ async fn rewrite(
             .sum();
         let projection = project_positions(dataset.schema(), own);
         let (live, reader) = open_narrow(dataset, manifest, fragment, &projection).await?;
+        let sizes = memory_column(dataset, manifest, fragment, own, live).await?;
         let mut next = 0;
-        // The first step reads one row, to measure its memory.
-        let mut step = 1;
-        let mut read_row = 0;
         let mut fragment_memory = 0;
         while next < live {
-            let end = live.min(next + step);
+            let end = step_end(next, live, sizes.as_deref());
             let mut stream = reader.read_range(next..end, end - next).await?.buffered(1);
             let mut batches = Vec::new();
             while let Some(batch) = stream.try_next().await? {
@@ -626,7 +625,6 @@ async fn rewrite(
                     }
                     let memory = memory_of_rows(first, take) as usize;
                     let part = copy_rows(&batch, take)?;
-                    read_row = read_row.max(part.get_array_memory_size() / take);
                     fragment_memory += memory;
                     if !pending.is_empty() && (pending_memory + memory) as u64 > target {
                         new_fragments.extend(writer.write(&std::mem::take(&mut pending)).await?);
@@ -649,8 +647,6 @@ async fn rewrite(
                     }
                 }
             }
-            let fit = READ_STEP_MEMORY / read_row.max(1);
-            step = fit.clamp(1, MAX_STEP_ROWS) as u32;
         }
         split |= fragment_memory as u64 > target;
     }
@@ -671,8 +667,8 @@ fn copy_rows(batch: &RecordBatch, rows: usize) -> Result<RecordBatch> {
 }
 
 /// The bytes in memory of the rows of `fragment`, deleted rows too, from
-/// [`MEMORY_COLUMN`]. Without a value in each row, the rows are read in
-/// steps and measured with [`row_memory`]. `own` has the top-level
+/// [`MEMORY_COLUMN`]. Without a value in each row, the rows are read one by
+/// one and measured with [`row_memory`]. `own` has the top-level
 /// positions of its columns. `manifest` is the manifest of `dataset`
 /// without its schema.
 async fn memory_of(
@@ -682,33 +678,38 @@ async fn memory_of(
     own: &[usize],
     piece: &Piece,
 ) -> Result<u64> {
-    let schema = dataset.schema();
-    let memory = schema.fields.iter().position(|f| f.name == MEMORY_COLUMN);
-    if let Some(position) = memory.filter(|position| own.contains(position)) {
-        let projection = project_positions(schema, &[position]);
-        let sizes = read_column(dataset, manifest, fragment, &projection).await?;
-        if let Some(sizes) = sizes {
-            return Ok(scale_to_rows(sizes, piece));
-        }
-    }
-    let projection = project_positions(schema, own);
+    let projection = project_positions(dataset.schema(), own);
     let (live, reader) = open_narrow(dataset, manifest, fragment, &projection).await?;
-    let mut next = 0;
-    // The first step reads one row, to measure its memory.
-    let mut step = 1;
+    if let Some(sizes) = memory_column(dataset, manifest, fragment, own, live).await? {
+        return Ok(scale_to_rows(sizes.iter().sum(), piece));
+    }
     let mut bytes = 0u64;
-    while next < live {
-        let end = live.min(next + step);
-        let mut stream = reader.read_range(next..end, end - next).await?.buffered(1);
-        let mut read_row = 0;
-        while let Some(batch) = stream.try_next().await? {
-            bytes += row_memory(&batch).values().iter().sum::<u64>();
-            read_row = read_row.max(batch.get_array_memory_size() / batch.num_rows().max(1));
+    for row in 0..live {
+        let mut stream = reader.read_range(row..row + 1, 1).await?;
+        while let Some(batch) = stream.next().await {
+            bytes += row_memory(&batch.await?).values().iter().sum::<u64>();
         }
-        next = end;
-        step = (READ_STEP_MEMORY / read_row.max(1)).clamp(1, MAX_STEP_ROWS) as u32;
     }
     Ok(scale_to_rows(bytes, piece))
+}
+
+/// The end of the read step that starts at row `next` of `live` rows. With
+/// the `sizes` of the rows, a step takes the rows that fit in
+/// [`READ_STEP_MEMORY`]. Without them, a step takes one row.
+fn step_end(next: u32, live: u32, sizes: Option<&[u64]>) -> u32 {
+    let Some(sizes) = sizes else {
+        return next + 1;
+    };
+    let mut end = next + 1;
+    let mut memory = sizes[next as usize];
+    while end < live && ((end - next) as usize) < MAX_STEP_ROWS {
+        memory += sizes[end as usize];
+        if memory > READ_STEP_MEMORY as u64 {
+            break;
+        }
+        end += 1;
+    }
+    end
 }
 
 /// The bytes of the live rows, `bytes`, for all rows of `piece`: the read
@@ -743,29 +744,36 @@ async fn open_narrow(
     Ok((live, reader))
 }
 
-/// The sum of the one `UInt64` column of `projection` in `fragment`, or
-/// `None` when a row has no value.
-async fn read_column(
+/// The [`MEMORY_COLUMN`] values of the `live` rows of `fragment`, or `None`
+/// when the fragment lacks the column or a row has no value. `own` has the
+/// top-level positions of its columns.
+async fn memory_column(
     dataset: &Dataset,
     manifest: &Manifest,
     fragment: &Fragment,
-    projection: &LanceSchema,
-) -> Result<Option<u64>> {
-    let (_, reader) = open_narrow(dataset, manifest, fragment, projection).await?;
-    let mut stream = reader.read_all(MAX_STEP_ROWS as u32).await?.buffered(2);
-    let mut sum = 0u64;
+    own: &[usize],
+    live: u32,
+) -> Result<Option<Vec<u64>>> {
+    let schema = dataset.schema();
+    let memory = schema.fields.iter().position(|f| f.name == MEMORY_COLUMN);
+    let Some(position) = memory.filter(|position| own.contains(position)) else {
+        return Ok(None);
+    };
+    let projection = project_positions(schema, &[position]);
+    let (_, reader) = open_narrow(dataset, manifest, fragment, &projection).await?;
+    let mut stream = reader
+        .read_range(0..live, MAX_STEP_ROWS as u32)
+        .await?
+        .buffered(2);
+    let mut sizes = Vec::with_capacity(live as usize);
     while let Some(batch) = stream.try_next().await? {
         let column = batch.column(0);
         if column.null_count() > 0 {
             return Ok(None);
         }
-        sum += column
-            .as_primitive::<UInt64Type>()
-            .values()
-            .iter()
-            .sum::<u64>();
+        sizes.extend_from_slice(column.as_primitive::<UInt64Type>().values());
     }
-    Ok(Some(sum))
+    Ok((sizes.len() == live as usize).then_some(sizes))
 }
 
 /// Writes rows as new fragments of one schema.
@@ -1127,6 +1135,16 @@ mod tests {
         assert_eq!(stats.fragments_removed, 2);
         assert_eq!(dataset.get_fragments().len(), 1);
         assert_eq!(read_ids(&dataset).await, want);
+    }
+
+    #[test]
+    fn steps_fit_the_sizes_or_take_one_row() {
+        let half = READ_STEP_MEMORY as u64 / 2;
+        assert_eq!(step_end(0, 5, Some(&[half, half, half, 1, 1])), 2);
+        assert_eq!(step_end(2, 5, Some(&[half, half, half, 1, 1])), 5);
+        // A row above the step memory is a step on its own.
+        assert_eq!(step_end(0, 2, Some(&[3 * half, 1])), 1);
+        assert_eq!(step_end(3, 5, None), 4);
     }
 
     #[test]

@@ -12,12 +12,12 @@ use std::time::Duration;
 
 use arrow::array::{Array, AsArray, RecordBatch, RecordBatchIterator, UInt32Array};
 use arrow::compute::take_record_batch;
-use arrow::datatypes::{DataType, Schema, SchemaRef, UInt32Type, UInt64Type};
+use arrow::datatypes::{Schema, SchemaRef, UInt64Type};
 use arrow::error::ArrowError;
 use futures::{StreamExt, TryStreamExt, stream};
 use lance::Dataset;
 use lance::dataset::fragment::write::FragmentCreateBuilder;
-use lance::dataset::fragment::{FileFragment, FragReadConfig};
+use lance::dataset::fragment::{FileFragment, FragReadConfig, FragmentReader};
 use lance::dataset::transaction::{Operation, RewriteGroup, Transaction};
 use lance::dataset::write::delete::DeleteBuilder;
 use lance::dataset::{CommitBuilder, WriteMode, WriteParams};
@@ -28,7 +28,7 @@ use lance_core::utils::tokio::get_num_compute_intensive_cpus;
 
 use crate::error::{Error, Result};
 use crate::format::check_format;
-use crate::memory::{MEMORY_COLUMN, add_memory, memory_sum};
+use crate::memory::{MEMORY_COLUMN, absent_bits, add_memory, row_memory};
 use crate::schema::{concat_conformed, fill_hidden_nulls};
 use crate::write::FILE_VERSION;
 
@@ -134,8 +134,8 @@ fn parallel_groups(options: &CompactOptions) -> usize {
 /// Merge small fragments, split large fragments and remove deleted rows.
 /// Keeps the row order, except with [`CompactOptions::cluster`].
 ///
-/// The plan uses the size of each fragment in memory, estimated from the
-/// number of values in its `dim_sizes` lists. Each run of neighboring
+/// The plan uses the size of each fragment in memory, from the memory
+/// column, or measured from its rows. Each run of neighboring
 /// fragments that need work becomes fragments of about the same size, near
 /// the target. A row is never split, so a row larger than the target is a
 /// fragment on its own. Each group holds one new fragment in memory at a
@@ -556,6 +556,7 @@ async fn rewrite(
         arrow_schema: Arc::new(Schema::from(&lance_schema)),
         lance_schema,
     };
+    let absent = absent_bits(&writer.arrow_schema)?;
 
     let bytes: f64 = pieces
         .iter()
@@ -576,25 +577,19 @@ async fn rewrite(
     let mut split = false;
     for ((fragment, piece), own) in fragments.iter().zip(pieces).zip(columns) {
         let row_bytes = piece.row_bytes().max(f64::MIN_POSITIVE);
+        // The write fills the columns of the group that the fragment lacks.
+        let missing_bits: u64 = union
+            .iter()
+            .zip(&absent)
+            .filter(|(position, _)| !own.contains(position))
+            .map(|(_, bits)| bits)
+            .sum();
         let projection = project_positions(dataset.schema(), own);
-        // Lance looks up each projected struct of a fragment read in the table
-        // schema, in a time linear in its columns. A narrow schema avoids that.
-        let mut narrow_manifest = manifest.clone();
-        narrow_manifest.schema = projection.clone();
-        let mut narrow = dataset.clone();
-        narrow.manifest = Arc::new(narrow_manifest);
-        // A fragment reader, not a scan: a scan plans with the full schema,
-        // which takes a time linear in the table columns for each fragment.
-        let file_fragment = FileFragment::new(Arc::new(narrow), fragment.clone());
-        // The deletion file has the exact count, the manifest may not.
-        let live = file_fragment.count_rows(None).await? as u32;
-        let reader = file_fragment
-            .open(&projection, FragReadConfig::default())
-            .await?;
+        let (live, reader) = open_narrow(dataset, manifest, fragment, &projection).await?;
         let mut next = 0;
         // The first step reads one row, to measure its memory.
         let mut step = 1;
-        let mut row_memory = 0;
+        let mut read_row = 0;
         let mut fragment_memory = 0;
         while next < live {
             let end = live.min(next + step);
@@ -607,6 +602,17 @@ async fn rewrite(
             // The parts keep the columns of the fragment. The write fills in
             // the others once for each new fragment, not for each step.
             for mut batch in batches {
+                // The memory of the first rows of `batch` in the new fragment.
+                let sizes = row_memory(&batch);
+                let mut sums = Vec::with_capacity(sizes.len() + 1);
+                sums.push(0u64);
+                for size in sizes.values() {
+                    sums.push(sums[sums.len() - 1] + size);
+                }
+                let mut first = 0;
+                let memory_of_rows = |first: usize, take: usize| {
+                    sums[first + take] - sums[first] + (missing_bits * take as u64).div_ceil(8)
+                };
                 while batch.num_rows() > 0 {
                     let mut take = if cuts < count {
                         let left = part_bytes * cuts as f64 - written - slack;
@@ -614,15 +620,13 @@ async fn rewrite(
                     } else {
                         batch.num_rows()
                     };
-                    let mut part = copy_rows(&batch, take)?;
-                    let mut memory = memory_sum(&part) as usize;
                     // Rows above the target together become a part each.
-                    while take > 1 && memory as u64 > target {
+                    while take > 1 && memory_of_rows(first, take) > target {
                         take /= 2;
-                        part = copy_rows(&batch, take)?;
-                        memory = memory_sum(&part) as usize;
                     }
-                    row_memory = row_memory.max(part.get_array_memory_size() / take);
+                    let memory = memory_of_rows(first, take) as usize;
+                    let part = copy_rows(&batch, take)?;
+                    read_row = read_row.max(part.get_array_memory_size() / take);
                     fragment_memory += memory;
                     if !pending.is_empty() && (pending_memory + memory) as u64 > target {
                         new_fragments.extend(writer.write(&std::mem::take(&mut pending)).await?);
@@ -637,6 +641,7 @@ async fn rewrite(
                     pending.push(part);
                     written += row_bytes * take as f64;
                     batch = batch.slice(take, batch.num_rows() - take);
+                    first += take;
                     if cuts < count && written + slack >= part_bytes * cuts as f64 {
                         new_fragments.extend(writer.write(&std::mem::take(&mut pending)).await?);
                         pending_memory = 0;
@@ -644,7 +649,7 @@ async fn rewrite(
                     }
                 }
             }
-            let fit = READ_STEP_MEMORY / row_memory.max(1);
+            let fit = READ_STEP_MEMORY / read_row.max(1);
             step = fit.clamp(1, MAX_STEP_ROWS) as u32;
         }
         split |= fragment_memory as u64 > target;
@@ -665,11 +670,11 @@ fn copy_rows(batch: &RecordBatch, rows: usize) -> Result<RecordBatch> {
     Ok(take_record_batch(batch, &indices)?)
 }
 
-/// The estimated bytes in memory of the rows of `fragment`, deleted rows
-/// too: the number of values in the `dim_sizes` lists of its nd variables,
-/// times the width of a value. `own` has the top-level positions of its
-/// columns. Other columns do not count. `manifest` is the manifest of
-/// `dataset` without its schema.
+/// The bytes in memory of the rows of `fragment`, deleted rows too, from
+/// [`MEMORY_COLUMN`]. Without a value in each row, the rows are read in
+/// steps and measured with [`row_memory`]. `own` has the top-level
+/// positions of its columns. `manifest` is the manifest of `dataset`
+/// without its schema.
 async fn memory_of(
     dataset: &Dataset,
     manifest: &Manifest,
@@ -686,50 +691,22 @@ async fn memory_of(
             return Ok(scale_to_rows(sizes, piece));
         }
     }
-    let mut fields = Vec::new();
-    let mut widths = Vec::new();
-    for &position in own {
-        let field = &schema.fields[position];
-        let values = field.children.iter().find(|c| c.name == "values");
-        let sizes = field.children.iter().find(|c| c.name == "dim_sizes");
-        let (Some(values), Some(sizes)) = (values, sizes) else {
-            continue;
-        };
-        let width = match values.data_type() {
-            DataType::List(item) | DataType::LargeList(item) => value_width(item.data_type()),
-            _ => continue,
-        };
-        let mut trimmed = field.clone();
-        trimmed.children = vec![sizes.clone()];
-        fields.push(trimmed);
-        widths.push(width);
-    }
-    if fields.is_empty() {
-        return Ok(0);
-    }
-    let projection = LanceSchema {
-        fields,
-        metadata: schema.metadata.clone(),
-    };
-    let mut stream = open_narrow(dataset, manifest, fragment, &projection).await?;
+    let projection = project_positions(schema, own);
+    let (live, reader) = open_narrow(dataset, manifest, fragment, &projection).await?;
+    let mut next = 0;
+    // The first step reads one row, to measure its memory.
+    let mut step = 1;
     let mut bytes = 0u64;
-    while let Some(batch) = stream.try_next().await? {
-        for (column, &width) in batch.columns().iter().zip(&widths) {
-            let column = column.as_struct();
-            let sizes = column.column(0).as_list::<i32>();
-            for row in 0..column.len() {
-                if column.is_null(row) || sizes.is_null(row) {
-                    continue;
-                }
-                let count: u64 = sizes
-                    .value(row)
-                    .as_primitive::<UInt32Type>()
-                    .iter()
-                    .map(|size| u64::from(size.unwrap_or(0)))
-                    .product();
-                bytes = bytes.saturating_add(count.saturating_mul(width));
-            }
+    while next < live {
+        let end = live.min(next + step);
+        let mut stream = reader.read_range(next..end, end - next).await?.buffered(1);
+        let mut read_row = 0;
+        while let Some(batch) = stream.try_next().await? {
+            bytes += row_memory(&batch).values().iter().sum::<u64>();
+            read_row = read_row.max(batch.get_array_memory_size() / batch.num_rows().max(1));
         }
+        next = end;
+        step = (READ_STEP_MEMORY / read_row.max(1)).clamp(1, MAX_STEP_ROWS) as u32;
     }
     Ok(scale_to_rows(bytes, piece))
 }
@@ -741,23 +718,29 @@ fn scale_to_rows(bytes: u64, piece: &Piece) -> u64 {
     bytes.saturating_mul(piece.rows.max(1)) / live
 }
 
-/// A stream of the rows of `fragment` with only the fields of
+/// The live rows of `fragment` and a reader of only the fields of
 /// `projection`. `manifest` is the manifest of `dataset` without its schema.
 async fn open_narrow(
     dataset: &Dataset,
     manifest: &Manifest,
     fragment: &Fragment,
     projection: &LanceSchema,
-) -> Result<impl futures::Stream<Item = lance::Result<RecordBatch>>> {
-    // A narrow schema: Lance looks up each projected struct in it.
+) -> Result<(u32, FragmentReader)> {
+    // Lance looks up each projected struct of a fragment read in the table
+    // schema, in a time linear in its columns. A narrow schema avoids that.
     let mut narrow_manifest = manifest.clone();
     narrow_manifest.schema = projection.clone();
     let mut narrow = dataset.clone();
     narrow.manifest = Arc::new(narrow_manifest);
-    let reader = FileFragment::new(Arc::new(narrow), fragment.clone())
+    // A fragment reader, not a scan: a scan plans with the full schema,
+    // which takes a time linear in the table columns for each fragment.
+    let file_fragment = FileFragment::new(Arc::new(narrow), fragment.clone());
+    // The deletion file has the exact count, the manifest may not.
+    let live = file_fragment.count_rows(None).await? as u32;
+    let reader = file_fragment
         .open(projection, FragReadConfig::default())
         .await?;
-    Ok(reader.read_all(MAX_STEP_ROWS as u32).await?.buffered(2))
+    Ok((live, reader))
 }
 
 /// The sum of the one `UInt64` column of `projection` in `fragment`, or
@@ -768,7 +751,8 @@ async fn read_column(
     fragment: &Fragment,
     projection: &LanceSchema,
 ) -> Result<Option<u64>> {
-    let mut stream = open_narrow(dataset, manifest, fragment, projection).await?;
+    let (_, reader) = open_narrow(dataset, manifest, fragment, projection).await?;
+    let mut stream = reader.read_all(MAX_STEP_ROWS as u32).await?.buffered(2);
     let mut sum = 0u64;
     while let Some(batch) = stream.try_next().await? {
         let column = batch.column(0);
@@ -782,12 +766,6 @@ async fn read_column(
             .sum::<u64>();
     }
     Ok(Some(sum))
-}
-
-/// The bytes of one value of `data_type` in memory. A string or binary
-/// value counts as 16 bytes.
-fn value_width(data_type: &DataType) -> u64 {
-    data_type.primitive_width().map_or(16, |width| width as u64)
 }
 
 /// Writes rows as new fragments of one schema.

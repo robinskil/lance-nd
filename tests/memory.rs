@@ -50,8 +50,11 @@ async fn a_writer_stores_the_memory_of_each_row() {
     let rows = [1000, 0, 10].map(|values| Ok(row(values)));
     writer.write(stream::iter(rows)).await.unwrap();
     let dataset = writer.finish().await.unwrap();
-    // 4 bytes per float, and 5 bytes plus a 4 byte offset for the string.
-    assert_eq!(memory(&dataset).await, [Some(4009), Some(9), Some(49)]);
+    let sizes: Vec<u64> = memory(&dataset).await.into_iter().flatten().collect();
+    // 4 bytes per float on top of the same offsets and validity bits.
+    assert_eq!(sizes[0] - sizes[2], 990 * 4);
+    // A row without `psal` still holds its null struct, but no values.
+    assert!(sizes[1] < sizes[2] && sizes[1] > 9, "{sizes:?}");
     // Readers leave the column out of the rows.
     let rows = scan(&dataset).try_collect().await.unwrap();
     assert!(rows[0].column_by_name(MEMORY_COLUMN).is_none());
@@ -99,7 +102,9 @@ async fn compaction_plans_without_the_column_and_then_writes_it() {
     assert_eq!(dataset.get_fragments().len(), 2);
     let sizes = memory(&dataset).await;
     assert!(sizes.iter().all(Option::is_some));
-    assert_eq!(sizes[0], Some(400_009));
+    // The values, and the offsets and validity bits of the columns.
+    let first = sizes[0].unwrap();
+    assert!((400_009..400_200).contains(&first), "{first}");
 
     // The next compaction plans from the column and finds no work.
     let version = dataset.version().version;

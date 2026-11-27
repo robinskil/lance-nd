@@ -21,7 +21,7 @@ use crate::cast::Casting;
 use crate::encode::{RowDecoder, encode_rows};
 use crate::error::{Error, Result};
 use crate::format::check_format;
-use crate::memory::memory_sum;
+use crate::memory::{MEMORY_COLUMN, add_memory, memory_sum};
 use crate::options::ColumnOptions;
 use crate::schema::{concat_conformed, holds, merge_field};
 use crate::stats::{STATS_PREFIX, is_stats_name};
@@ -437,7 +437,11 @@ impl NdWriter {
             };
             // One batch per fragment: Lance 14 fails to read back a fragment of
             // several batches when a struct column has nulls and large lists.
-            let batch = concat_conformed(&present, &cluster)?;
+            let mut batch = concat_conformed(&present, &cluster)?;
+            // The size of each row with the null columns of this fragment.
+            if present.index_of(MEMORY_COLUMN).is_ok() {
+                batch = add_memory(&batch)?;
+            }
             writes.push((batch, present, projected));
         }
         let uri = self.uri.clone();

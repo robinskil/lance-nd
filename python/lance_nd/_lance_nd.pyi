@@ -161,7 +161,10 @@ class Table:
     ) -> dict[str, int]:
         """Merge small fragments, split large fragments and remove deleted datasets.
 
-        The target is ``target_fragment_bytes`` on disk (default 128 MiB).
+        The target is ``target_fragment_bytes`` in memory (default 128 MiB),
+        estimated for each fragment from the number of its values. A new
+        fragment is written from one batch, so a compaction holds about
+        twice the target in memory.
         A fragment below half the target is merged with its small neighbors.
         A fragment above twice the target is split. A fragment with at least
         ``deleted_fraction`` deleted datasets (default 0.1) is written again

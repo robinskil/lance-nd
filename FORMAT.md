@@ -120,6 +120,13 @@ Rules:
    stats columns out of the nd record batches.
 8. A writer adds stats to each row when the table has the key. Only the
    create or the overwrite of a table sets the key.
+9. Each table can have the column `__stats__memory` (`UInt64`, nullable),
+   also without the key. It holds the bytes in memory of the array values
+   of each row: the number of values times their width, and for strings and
+   binary values their bytes plus one offset each. Other columns do not
+   count. A writer and a compaction size fragments by this value. A null
+   row has no known size, as an older writer leaves it. A compaction then
+   estimates the size from the `dim_sizes` lists and writes the value.
 
 The separator is `:`, because Lance does not allow `.` in a top-level
 name. The variable is the part after the first `:`, so a variable name can

@@ -435,6 +435,24 @@ async fn target_bytes_splits_fragments() {
 }
 
 #[tokio::test]
+async fn target_bytes_counts_memory() {
+    let dir = tempfile::tempdir().unwrap();
+    // Rows of 800 KB in memory: the buffer reaches 2 MB at the third row.
+    let options = WriteOptions {
+        target_fragment_bytes: 2_000_000,
+        ..Default::default()
+    };
+    let batches = (0..9).map(|_| psal(10_000)).collect();
+    let dataset = write_one_by_one(&uri(&dir), batches, &options).await;
+    let rows: Vec<usize> = dataset
+        .get_fragments()
+        .iter()
+        .map(|fragment| fragment.metadata().physical_rows.unwrap())
+        .collect();
+    assert_eq!(rows, [3, 3, 3]);
+}
+
+#[tokio::test]
 async fn parallel_writes_keep_row_order() {
     let dir = tempfile::tempdir().unwrap();
     let options = WriteOptions {
@@ -841,7 +859,7 @@ fn zeros_row(i: usize) -> NdRecordBatch {
 }
 
 #[tokio::test]
-async fn fragment_target_learns_the_size_on_disk() {
+async fn fragment_target_ignores_the_size_on_disk() {
     let dir = tempfile::tempdir().unwrap();
     let options = WriteOptions {
         target_fragment_bytes: 256 << 10,
@@ -850,9 +868,9 @@ async fn fragment_target_learns_the_size_on_disk() {
     };
     let rows_in: Vec<NdRecordBatch> = (0..200).map(zeros_row).collect();
     let dataset = write_one_by_one(&uri(&dir), rows_in, &options).await;
-    // By memory size, a fragment would end every two rows.
-    let fragments = dataset.get_fragments().len();
-    assert!((2..=30).contains(&fragments), "{fragments} fragments");
+    // Rows of 160 KB in memory end a fragment every two rows, though zeros
+    // take almost nothing on disk.
+    assert_eq!(dataset.get_fragments().len(), 100);
     assert_eq!(dataset.count_rows(None).await.unwrap(), 200);
 }
 

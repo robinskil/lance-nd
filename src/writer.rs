@@ -21,6 +21,7 @@ use crate::cast::Casting;
 use crate::encode::{RowDecoder, encode_rows};
 use crate::error::{Error, Result};
 use crate::format::check_format;
+use crate::memory::memory_sum;
 use crate::options::ColumnOptions;
 use crate::schema::{concat_conformed, holds, merge_field};
 use crate::stats::{STATS_PREFIX, is_stats_name};
@@ -33,11 +34,11 @@ use crate::write::{
 
 /// A writer that makes all its rows visible in one commit.
 ///
-/// [`NdWriter::write`] buffers rows. When the buffer has about
-/// [`WriteOptions::target_fragment_bytes`] on disk, as estimated from the
-/// fragments written so far, a Tokio task writes it as Lance fragments:
-/// one per run of rows with similar variables, each with only the columns
-/// of its rows. Up to [`WriteOptions::write_parallelism`] tasks run at the
+/// [`NdWriter::write`] buffers rows. When the buffer reaches
+/// [`WriteOptions::target_fragment_bytes`] in memory, a Tokio task writes it
+/// as Lance fragments: one per run of rows with similar variables, each with
+/// only the columns of its rows. Each fragment is written from one batch, so
+/// a write holds about twice the target in memory. Up to [`WriteOptions::write_parallelism`] tasks run at the
 /// same time. Readers do not see the fragments.
 /// [`NdWriter::finish`] writes the rest and commits all of them in one new
 /// table version, in the order of the rows. The writer must run on a Tokio
@@ -75,12 +76,9 @@ pub struct NdWriter {
     /// Rows for the next fragment, and their size in memory.
     buffer: Vec<RecordBatch>,
     buffered_bytes: usize,
-    /// Fragment writes that run, in the order of their rows, with the
-    /// size of their rows in memory.
-    pending: VecDeque<(JoinHandle<Result<Vec<Fragment>>>, usize)>,
+    /// Fragment writes that run, in the order of their rows.
+    pending: VecDeque<JoinHandle<Result<Vec<Fragment>>>>,
     fragments: Vec<Fragment>,
-    /// The bytes in memory and on disk of the fragments written so far.
-    written: DiskRatio,
     /// The error of a failed fragment write. `finish` then fails too.
     failed: Option<Arc<Error>>,
 }
@@ -121,7 +119,6 @@ impl NdWriter {
             buffered_bytes: 0,
             pending: VecDeque::new(),
             fragments: Vec::new(),
-            written: DiskRatio::default(),
             failed: None,
         })
     }
@@ -153,7 +150,6 @@ impl NdWriter {
             buffered_bytes: 0,
             pending: VecDeque::new(),
             fragments: Vec::new(),
-            written: DiskRatio::default(),
             failed: None,
         })
     }
@@ -318,11 +314,9 @@ impl NdWriter {
     async fn push(&mut self, batches: Vec<RecordBatch>) -> Result<()> {
         self.grow(&batches)?;
         for batch in batches {
-            self.buffered_bytes += batch.get_array_memory_size();
+            self.buffered_bytes += memory_sum(&batch) as usize;
             self.buffer.push(batch);
-            if self.written.on_disk(self.buffered_bytes)
-                >= self.options.target_fragment_bytes as f64
-            {
+            if self.buffered_bytes >= self.options.target_fragment_bytes {
                 let result = self.flush().boxed().await;
                 self.fail_on(result)?;
             }
@@ -420,7 +414,7 @@ impl NdWriter {
         }
         self.evolve().await?;
         let batches = std::mem::take(&mut self.buffer);
-        let memory = std::mem::take(&mut self.buffered_bytes);
+        self.buffered_bytes = 0;
         // One fragment per cluster of similar rows, each with only the
         // columns of its rows: the other columns read as null.
         let mut writes = Vec::new();
@@ -441,7 +435,7 @@ impl NdWriter {
                     .collect(),
                 metadata: lance.metadata.clone(),
             };
-            // One batch per fragment: Lance 11 fails to read back a fragment of
+            // One batch per fragment: Lance 14 fails to read back a fragment of
             // several batches when a struct column has nulls and large lists.
             let batch = concat_conformed(&present, &cluster)?;
             writes.push((batch, present, projected));
@@ -473,7 +467,7 @@ impl NdWriter {
                 .await?;
             Ok(written.into_iter().flatten().collect())
         });
-        self.pending.push_back((task, memory));
+        self.pending.push_back(task);
         while self.pending.len() > self.options.write_parallelism.max(1) {
             self.wait_oldest().await?;
         }
@@ -524,11 +518,10 @@ impl NdWriter {
 
     /// Wait for the oldest fragment write and keep its fragments.
     async fn wait_oldest(&mut self) -> Result<()> {
-        let Some((task, memory)) = self.pending.pop_front() else {
+        let Some(task) = self.pending.pop_front() else {
             return Ok(());
         };
         let fragments = task.await??;
-        self.written.add(memory, &fragments);
         self.fragments.extend(fragments);
         Ok(())
     }
@@ -632,7 +625,7 @@ impl NdWriter {
 impl Drop for NdWriter {
     /// Stop the fragment writes that run. Their rows are never committed.
     fn drop(&mut self) {
-        for (task, _) in &self.pending {
+        for task in &self.pending {
             task.abort();
         }
     }
@@ -713,44 +706,6 @@ fn nullable_global_attributes(batch: RecordBatch) -> Result<RecordBatch> {
         Arc::new(schema),
         batch.columns().to_vec(),
     )?)
-}
-
-/// The bytes in memory and on disk of the written fragments, to estimate
-/// the size on disk of the buffered rows.
-#[derive(Debug, Default)]
-struct DiskRatio {
-    memory: u64,
-    disk: u64,
-}
-
-impl DiskRatio {
-    /// The lowest ratio of bytes on disk to bytes in memory. It limits the
-    /// buffer to 8 times the target, for data that compresses very well.
-    const MIN: f64 = 1.0 / 8.0;
-
-    /// Count the rows of `memory` bytes that became `fragments`. A data file
-    /// of unknown size counts nothing.
-    fn add(&mut self, memory: usize, fragments: &[Fragment]) {
-        let files = fragments.iter().flat_map(|fragment| fragment.files.iter());
-        let sizes: Option<Vec<u64>> = files
-            .map(|file| file.file_size_bytes.get().map(|size| size.get()))
-            .collect();
-        if let Some(sizes) = sizes {
-            self.memory += memory as u64;
-            self.disk += sizes.iter().sum::<u64>();
-        }
-    }
-
-    /// The estimated bytes on disk of `memory` bytes in memory. Before the
-    /// first fragment, the bytes in memory.
-    fn on_disk(&self, memory: usize) -> f64 {
-        let ratio = if self.memory == 0 {
-            1.0
-        } else {
-            (self.disk as f64 / self.memory as f64).max(Self::MIN)
-        };
-        memory as f64 * ratio
-    }
 }
 
 /// The most tries of a row commit that a concurrent commit preempts.

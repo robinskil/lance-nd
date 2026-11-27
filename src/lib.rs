@@ -29,6 +29,7 @@ mod encode;
 mod error;
 mod format;
 mod maintenance;
+mod memory;
 mod options;
 mod prune;
 mod scan;
@@ -50,6 +51,7 @@ pub use maintenance::{
     CleanupStats, CompactOptions, CompactionStats, cleanup_old_versions, compact, delete,
     delete_expr,
 };
+pub use memory::MEMORY_COLUMN;
 pub use options::{
     ByteStreamSplit, ColumnOptions, Compression, StructuralEncoding, column_defaults,
     set_column_defaults,

@@ -463,6 +463,6 @@ mod tests {
             .iter()
             .map(|f| f.name.as_str())
             .collect();
-        assert_eq!(names, ["v"]);
+        assert_eq!(names, ["v", crate::MEMORY_COLUMN]);
     }
 }

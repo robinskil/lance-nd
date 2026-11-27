@@ -13,6 +13,7 @@ use nd_arrow_array::NdRecordBatch;
 use crate::cast::{Casting, cast_to};
 use crate::error::{Error, Result};
 use crate::format::add_format;
+use crate::memory::add_memory;
 use crate::options::{ColumnOptions, column_defaults, with_column_options};
 use crate::schema::conform_batch;
 use crate::stats::{add_stats, has_stats};
@@ -69,11 +70,10 @@ pub struct WriteOptions {
     /// another commit changes the table first, `finish` fails and commits
     /// nothing. A commit between that check and the final commit is lost.
     pub defer_promotion: bool,
-    /// [`crate::NdWriter`] buffers rows until they have about this many
-    /// bytes on disk, then writes them as one Lance fragment. The writer
-    /// learns the ratio of disk to memory bytes from the fragments it wrote.
-    /// Before the first fragment, it counts bytes in memory. The buffer
-    /// holds at most 8 times this size in memory. A row is never split.
+    /// [`crate::NdWriter`] buffers rows until they have this many bytes in
+    /// memory, then writes them as Lance fragments, each from one batch. A
+    /// write holds about twice this size in memory. The fragments are
+    /// smaller on disk, as Lance compresses them. A row is never split.
     /// [`write()`] ignores it.
     pub target_fragment_bytes: usize,
     /// The most fragments that [`crate::NdWriter`] writes at the same time.
@@ -204,6 +204,7 @@ pub(crate) fn prepare_batch(
     if stats {
         batch = add_stats(&batch)?;
     }
+    batch = add_memory(&batch)?;
     let mut metadata = batch.schema().metadata().clone();
     metadata.extend(defaults.to_table_metadata());
     add_format(&mut metadata);

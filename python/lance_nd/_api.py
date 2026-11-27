@@ -223,10 +223,10 @@ def create(
     ``aws_region`` or ``aws_endpoint``. An empty value uses the defaults of
     the environment.
 
-    The writer buffers datasets until they have about
-    ``target_fragment_bytes`` (default 128 MiB) on disk, as estimated from
-    the fragments written so far, then writes them as one Lance fragment. ``write_parallelism`` (default 4) fragments are
-    written at the same time.
+    The writer buffers datasets until they have ``target_fragment_bytes``
+    (default 128 MiB) in memory, then writes them as Lance fragments, each
+    from one batch. A write holds about twice this size in memory.
+    ``write_parallelism`` (default 4) fragments are written at the same time.
     """
     native = _lance_nd.Writer.create(
         uri,

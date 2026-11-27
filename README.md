@@ -133,6 +133,13 @@ so a new major version of Lance is a breaking change of the Rust API.
 lance-nd 0.3 uses Lance 14. It reads and changes the tables of lance-nd 0.2,
 and lance-nd 0.2 reads and changes the tables of 0.3.
 
+From lance-nd 0.4, `target_fragment_bytes` is a size in memory, for writes
+and compactions. A fragment is written from one batch of about this size, so
+a write holds about twice this size in memory. The fragments are smaller on
+disk, as Lance compresses them. Each row stores its size in memory in the
+column `__stats__memory`, so a compaction plans without reading the data.
+Tables stay the same format, and lance-nd 0.2 and 0.3 ignore the column.
+
 For a table with many variables, where each row has only some of them, use
 the cluster mode of compaction (`CompactOptions::cluster`). It merges
 fragments with similar variables from anywhere in the table, so fragments

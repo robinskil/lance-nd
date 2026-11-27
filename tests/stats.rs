@@ -4,7 +4,7 @@ use arrow::array::{
     Array, ArrayRef, AsArray, Float64Array, Int32Array, RecordBatch, StringArray, StructArray,
 };
 use arrow::datatypes::{Field, Float64Type, Int32Type, Schema};
-use lance_nd::{STATS_PREFIX, encode_rows, has_stats, stats_column};
+use lance_nd::{MEMORY_COLUMN, STATS_PREFIX, encode_rows, has_stats, stats_column};
 use nd_arrow_array::{Dimensions, NdArrowArray, NdRecordBatch};
 
 fn row(variables: Vec<(&str, ArrayRef)>) -> NdRecordBatch {
@@ -30,12 +30,13 @@ fn child<'a>(batch: &'a RecordBatch, variable: &str) -> &'a StructArray {
 }
 
 /// The names of the stats columns of `schema`.
+/// The names of the stats columns of variables, without the memory column.
 fn stats_names(schema: &Schema) -> Vec<String> {
     schema
         .fields()
         .iter()
         .map(|f| f.name().clone())
-        .filter(|name| name.starts_with(STATS_PREFIX))
+        .filter(|name| name.starts_with(STATS_PREFIX) && name != MEMORY_COLUMN)
         .collect()
 }
 

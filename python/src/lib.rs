@@ -429,19 +429,21 @@ impl Table {
     }
 
     /// Merge small fragments, split large fragments and remove deleted datasets.
-    #[pyo3(signature = (target_fragment_bytes = None, deleted_fraction = None, cluster = false))]
+    #[pyo3(signature = (target_fragment_bytes = None, deleted_fraction = None, cluster = false, memory_limit = None))]
     fn compact(
         &mut self,
         py: Python<'_>,
         target_fragment_bytes: Option<u64>,
         deleted_fraction: Option<f32>,
         cluster: bool,
+        memory_limit: Option<u64>,
     ) -> PyResult<HashMap<&'static str, usize>> {
         let defaults = CompactOptions::default();
         let options = CompactOptions {
             target_fragment_bytes: target_fragment_bytes.unwrap_or(defaults.target_fragment_bytes),
             deleted_fraction: deleted_fraction.unwrap_or(defaults.deleted_fraction),
             cluster,
+            memory_limit: memory_limit.unwrap_or(defaults.memory_limit),
         };
         let metrics =
             block_on(py, lance_nd::compact(&mut self.dataset, &options)).map_err(to_py)?;

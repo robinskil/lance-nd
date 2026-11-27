@@ -158,6 +158,7 @@ class Table:
         target_fragment_bytes: int | None = None,
         deleted_fraction: float | None = None,
         cluster: bool = False,
+        memory_limit: int | None = None,
     ) -> dict[str, int]:
         """Merge small fragments, split large fragments and remove deleted datasets.
 
@@ -170,7 +171,9 @@ class Table:
         ``deleted_fraction`` deleted datasets (default 0.1) is written again
         without them. With ``cluster``, fragments with similar variables merge
         from anywhere in the table, so the new fragments hold few columns and
-        the datasets do not keep their order. Returns the counts ``fragments_removed``,
+        the datasets do not keep their order. Groups of fragments rewrite in
+        parallel, at most one per core, within ``memory_limit`` bytes in total
+        (default 4 GiB). Returns the counts ``fragments_removed``,
         ``fragments_added``, ``files_removed`` and ``files_added``.
         """
 

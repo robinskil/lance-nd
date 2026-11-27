@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use arrow::array::{Array, AsArray, RecordBatch, RecordBatchIterator, UInt32Array};
-use arrow::compute::{concat_batches, take_record_batch};
+use arrow::compute::take_record_batch;
 use arrow::datatypes::{DataType, Schema, SchemaRef, UInt32Type, UInt64Type};
 use arrow::error::ArrowError;
 use futures::{StreamExt, TryStreamExt, stream};
@@ -26,10 +26,10 @@ use lance::table::format::{Fragment, Manifest};
 use lance_core::datatypes::Schema as LanceSchema;
 use lance_core::utils::tokio::get_num_compute_intensive_cpus;
 
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::format::check_format;
 use crate::memory::{MEMORY_COLUMN, add_memory, memory_sum};
-use crate::schema::{conform_batch, fill_hidden_nulls};
+use crate::schema::{concat_conformed, fill_hidden_nulls};
 use crate::write::FILE_VERSION;
 
 /// Delete the rows that match `predicate`, a Lance SQL filter.
@@ -91,8 +91,8 @@ pub struct CompactOptions {
     /// The size of a fragment in memory that a compaction aims for. A
     /// fragment below half this size is merged with its small neighbors. A
     /// fragment above twice this size is split. A new fragment is written
-    /// from one batch of at most this size, so a compaction holds about
-    /// twice this size in memory. The default is 128 MiB.
+    /// from one batch of at most this size, so each group in rewrite holds
+    /// about twice this size in memory. The default is 128 MiB.
     pub target_fragment_bytes: u64,
     /// A fragment with at least this fraction of deleted rows is rewritten
     /// without them. The default is 0.1. A value above 1 never rewrites a
@@ -103,6 +103,11 @@ pub struct CompactOptions {
     /// keeps reads and compactions of tables with many variables fast. The
     /// rows do not keep their order. The default is `false`.
     pub cluster: bool,
+    /// The memory that all groups in rewrite use together. Each group holds
+    /// about twice the target and one read step, so this sets how many
+    /// groups run at the same time, at most one per core. The default is
+    /// 4 GiB.
+    pub memory_limit: u64,
 }
 
 impl Default for CompactOptions {
@@ -111,8 +116,19 @@ impl Default for CompactOptions {
             target_fragment_bytes: 128 << 20,
             deleted_fraction: 0.1,
             cluster: false,
+            memory_limit: 4 << 30,
         }
     }
+}
+
+/// The number of groups that rewrite at the same time for `options`.
+fn parallel_groups(options: &CompactOptions) -> usize {
+    let target = options.target_fragment_bytes.max(1);
+    let group = target
+        .saturating_mul(2)
+        .saturating_add(READ_STEP_MEMORY as u64);
+    let fit = (options.memory_limit / group).max(1);
+    fit.min(get_num_compute_intensive_cpus() as u64) as usize
 }
 
 /// Merge small fragments, split large fragments and remove deleted rows.
@@ -122,9 +138,10 @@ impl Default for CompactOptions {
 /// number of values in its `dim_sizes` lists. Each run of neighboring
 /// fragments that need work becomes fragments of about the same size, near
 /// the target. A row is never split, so a row larger than the target is a
-/// fragment on its own. lance-nd holds one new fragment in memory at a
-/// time, and closes it when its rows reach the target. Without work to do,
-/// the table keeps its version.
+/// fragment on its own. Each group holds one new fragment in memory at a
+/// time, and closes it when its rows reach the target. Groups rewrite in
+/// parallel within [`CompactOptions::memory_limit`]. Without work to do, the
+/// table keeps its version.
 #[tracing::instrument(skip_all, fields(uri = %dataset.uri()), err)]
 pub async fn compact(dataset: &mut Dataset, options: &CompactOptions) -> Result<CompactionStats> {
     check_format(dataset)?;
@@ -178,24 +195,35 @@ pub async fn compact(dataset: &mut Dataset, options: &CompactOptions) -> Result<
     let mut metrics = CompactionStats::default();
     let read_version = dataset.version().version;
     let mut groups = Vec::with_capacity(tasks.len());
-    for task in tasks {
+    let shared = Arc::new(dataset.clone());
+    let bare = Arc::new(bare_manifest);
+    let rewrites = tasks.into_iter().map(|task| {
         let old: Vec<Fragment> = task.iter().map(|&i| fragments[i].clone()).collect();
         let task_pieces: Vec<Piece> = task.iter().map(|&i| pieces[i]).collect();
         let task_columns: Vec<Vec<usize>> = task.iter().map(|&i| columns[i].clone()).collect();
         let forced = task_pieces
             .iter()
             .any(|p| needs_rewrite(p, target, options.deleted_fraction));
-        let Some(new_fragments) = rewrite(
-            dataset,
-            &bare_manifest,
-            &old,
-            &task_pieces,
-            &task_columns,
-            target,
-            forced,
-        )
-        .await?
-        else {
+        let (dataset, manifest) = (shared.clone(), bare.clone());
+        // A task of its own, so that each group decodes on its own core.
+        tokio::spawn(async move {
+            let new_fragments = rewrite(
+                &dataset,
+                &manifest,
+                &old,
+                &task_pieces,
+                &task_columns,
+                target,
+                forced,
+            )
+            .await?;
+            Ok::<_, crate::Error>((old, new_fragments))
+        })
+    });
+    let mut done = stream::iter(rewrites).buffered(parallel_groups(options));
+    while let Some(result) = done.next().await {
+        let (old, new_fragments) = result??;
+        let Some(new_fragments) = new_fragments else {
             continue;
         };
         metrics.fragments_removed += old.len();
@@ -210,6 +238,7 @@ pub async fn compact(dataset: &mut Dataset, options: &CompactOptions) -> Result<
             new_fragments,
         });
     }
+    drop(done);
     if groups.is_empty() {
         return Ok(metrics);
     }
@@ -466,8 +495,9 @@ fn needs_rewrite(p: &Piece, target: u64, deleted_fraction: f32) -> bool {
 /// a small step, so that they read in several steps.
 const READ_STEP_MEMORY: usize = if cfg!(test) { 1 << 20 } else { 64 << 20 };
 
-/// The most rows of one read step in a compaction.
-const MAX_STEP_ROWS: usize = 1024;
+/// The most rows of one read step in a compaction. Each step pays a fixed
+/// cost for each column, so a table of many columns needs large steps.
+const MAX_STEP_ROWS: usize = 8192;
 
 /// The number of new fragments for `bytes` in `rows` rows: the nearest to
 /// `bytes / target`, at least one, at most one per row.
@@ -544,25 +574,22 @@ async fn rewrite(
     let mut new_fragments = Vec::new();
     // An old fragment above the cap becomes smaller fragments: that is work.
     let mut split = false;
-    // Lance looks up each projected struct of a fragment read in the table
-    // schema, in a time linear in its columns. A narrow schema avoids that.
-    let mut narrow_manifest = manifest.clone();
-    narrow_manifest.schema = writer.lance_schema.clone();
-    let mut narrow = dataset.clone();
-    narrow.manifest = Arc::new(narrow_manifest);
-    let shared = Arc::new(narrow);
     for ((fragment, piece), own) in fragments.iter().zip(pieces).zip(columns) {
         let row_bytes = piece.row_bytes().max(f64::MIN_POSITIVE);
+        let projection = project_positions(dataset.schema(), own);
+        // Lance looks up each projected struct of a fragment read in the table
+        // schema, in a time linear in its columns. A narrow schema avoids that.
+        let mut narrow_manifest = manifest.clone();
+        narrow_manifest.schema = projection.clone();
+        let mut narrow = dataset.clone();
+        narrow.manifest = Arc::new(narrow_manifest);
         // A fragment reader, not a scan: a scan plans with the full schema,
         // which takes a time linear in the table columns for each fragment.
-        let file_fragment = FileFragment::new(shared.clone(), fragment.clone());
+        let file_fragment = FileFragment::new(Arc::new(narrow), fragment.clone());
         // The deletion file has the exact count, the manifest may not.
         let live = file_fragment.count_rows(None).await? as u32;
         let reader = file_fragment
-            .open(
-                &project_positions(dataset.schema(), own),
-                FragReadConfig::default(),
-            )
+            .open(&projection, FragReadConfig::default())
             .await?;
         let mut next = 0;
         // The first step reads one row, to measure its memory.
@@ -577,8 +604,9 @@ async fn rewrite(
                 batches.push(batch);
             }
             next = end;
-            for batch in batches {
-                let mut batch = writer.conform(&batch)?;
+            // The parts keep the columns of the fragment. The write fills in
+            // the others once for each new fragment, not for each step.
+            for mut batch in batches {
                 while batch.num_rows() > 0 {
                     let mut take = if cuts < count {
                         let left = part_bytes * cuts as f64 - written - slack;
@@ -729,7 +757,7 @@ async fn open_narrow(
     let reader = FileFragment::new(Arc::new(narrow), fragment.clone())
         .open(projection, FragReadConfig::default())
         .await?;
-    Ok(reader.read_all(1024).await?.buffered(2))
+    Ok(reader.read_all(MAX_STEP_ROWS as u32).await?.buffered(2))
 }
 
 /// The sum of the one `UInt64` column of `projection` in `fragment`, or
@@ -770,10 +798,10 @@ struct PartWriter<'a> {
 }
 
 impl PartWriter<'_> {
-    /// `batch` with the columns and the null rules of the new fragments,
-    /// and the memory column of each row.
-    fn conform(&self, batch: &RecordBatch) -> Result<RecordBatch> {
-        let batch = conform_batch(batch, &self.arrow_schema)?;
+    /// The rows of `parts` as one batch with the columns and the null rules
+    /// of the new fragments, and the memory column of each row.
+    fn conform(&self, parts: &[RecordBatch]) -> Result<RecordBatch> {
+        let batch = concat_conformed(&self.arrow_schema, parts)?;
         let columns = self
             .arrow_schema
             .fields()
@@ -797,7 +825,7 @@ impl PartWriter<'_> {
             store_params: self.dataset.store_params().cloned(),
             ..Default::default()
         };
-        let concat = |part: &[RecordBatch]| concat_batches(&self.arrow_schema, part);
+        let concat = |part: &[RecordBatch]| self.conform(part);
         let mut new_fragments = Vec::new();
         // One batch per fragment: Lance 14 fails to read back a fragment of
         // several batches when a struct column has nulls and large lists.
@@ -824,17 +852,17 @@ impl PartWriter<'_> {
 /// overflows that limit, each half of `batches` is joined on its own.
 fn split_concat(
     batches: &[RecordBatch],
-    concat: &impl Fn(&[RecordBatch]) -> Result<RecordBatch, ArrowError>,
+    concat: &impl Fn(&[RecordBatch]) -> Result<RecordBatch>,
 ) -> Result<Vec<RecordBatch>> {
     match concat(batches) {
         Ok(batch) => Ok(vec![batch]),
-        Err(ArrowError::OffsetOverflowError(_)) if batches.len() > 1 => {
+        Err(Error::Arrow(ArrowError::OffsetOverflowError(_))) if batches.len() > 1 => {
             let (first, second) = batches.split_at(batches.len() / 2);
             let mut parts = split_concat(first, concat)?;
             parts.extend(split_concat(second, concat)?);
             Ok(parts)
         }
-        Err(error) => Err(error.into()),
+        Err(error) => Err(error),
     }
 }
 
@@ -1130,9 +1158,9 @@ mod tests {
         // More than two batches overflow, as a large list column does.
         let concat = |part: &[RecordBatch]| {
             if part.len() > 2 {
-                return Err(ArrowError::OffsetOverflowError(part.len()));
+                return Err(ArrowError::OffsetOverflowError(part.len()).into());
             }
-            concat_batches(&schema, part)
+            Ok(arrow::compute::concat_batches(&schema, part)?)
         };
         let parts = split_concat(&batches, &concat).unwrap();
         let parts: Vec<Vec<i64>> = parts.iter().map(ids).collect();
@@ -1142,7 +1170,7 @@ mod tests {
     #[test]
     fn concat_keeps_other_errors() {
         let batches: Vec<RecordBatch> = (0..2).map(batch).collect();
-        let concat = |_: &[RecordBatch]| Err(ArrowError::ComputeError("no".into()));
+        let concat = |_: &[RecordBatch]| Err(ArrowError::ComputeError("no".into()).into());
         assert!(split_concat(&batches, &concat).is_err());
     }
 }

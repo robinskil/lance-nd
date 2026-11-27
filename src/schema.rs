@@ -1,5 +1,6 @@
 //! Merge table schemas and shape record batches to a table schema.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use arrow::array::BooleanBufferBuilder;
@@ -54,10 +55,11 @@ pub(crate) fn merge_field(base: &Field, other: &Field, path: &str) -> Result<Fie
 /// Shape `batch` to `schema`: reorder fields by name and fill missing
 /// fields with [`absent`] values, also inside structs.
 pub fn conform_batch(batch: &RecordBatch, schema: &SchemaRef) -> Result<RecordBatch> {
+    let names = ColumnNames::new(batch);
     let columns = schema
         .fields()
         .iter()
-        .map(|field| match batch.column_by_name(field.name()) {
+        .map(|field| match names.column(field.name()) {
             Some(column) => conform(column, field),
             None => absent(field, batch.num_rows()),
         })
@@ -75,18 +77,14 @@ pub fn conform_batch(batch: &RecordBatch, schema: &SchemaRef) -> Result<RecordBa
 /// them.
 pub fn concat_conformed(schema: &SchemaRef, batches: &[RecordBatch]) -> Result<RecordBatch> {
     let rows: usize = batches.iter().map(|batch| batch.num_rows()).sum();
+    let names: Vec<ColumnNames> = batches.iter().map(ColumnNames::new).collect();
     let columns = schema
         .fields()
         .iter()
         .map(|field| {
-            let parts: Vec<Part> = batches
+            let parts: Vec<Part> = names
                 .iter()
-                .map(|batch| {
-                    (
-                        batch.column_by_name(field.name()).cloned(),
-                        batch.num_rows(),
-                    )
-                })
+                .map(|names| (names.column(field.name()).cloned(), names.batch.num_rows()))
                 .collect();
             concat_parts(field, &parts)
         })
@@ -99,12 +97,39 @@ pub fn concat_conformed(schema: &SchemaRef, batches: &[RecordBatch]) -> Result<R
     )?)
 }
 
+/// The columns of a batch by name. A lookup in the schema is linear, which
+/// is slow for a table of many columns.
+struct ColumnNames<'a> {
+    batch: &'a RecordBatch,
+    index: HashMap<&'a str, usize>,
+}
+
+impl<'a> ColumnNames<'a> {
+    fn new(batch: &'a RecordBatch) -> Self {
+        let index = batch
+            .schema_ref()
+            .fields()
+            .iter()
+            .enumerate()
+            .map(|(i, field)| (field.name().as_str(), i))
+            .collect();
+        Self { batch, index }
+    }
+
+    fn column(&self, name: &str) -> Option<&'a ArrayRef> {
+        self.index.get(name).map(|&i| self.batch.column(i))
+    }
+}
+
 /// The array of one batch, or `None` when the batch lacks it, and the rows.
 type Part = (Option<ArrayRef>, usize);
 
 /// One array of `field` from `parts`. A struct is built child by child, so
 /// a batch with few of many children costs little.
 fn concat_parts(field: &Field, parts: &[Part]) -> Result<ArrayRef> {
+    if parts.iter().all(|(array, _)| array.is_none()) {
+        return absent(field, parts.iter().map(|(_, rows)| rows).sum());
+    }
     if let DataType::Struct(children) = field.data_type()
         && !children.is_empty()
     {

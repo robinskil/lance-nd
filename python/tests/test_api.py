@@ -158,6 +158,17 @@ def test_fragment_options(table_uri):
     assert table.count_rows() == 5
 
 
+def test_variable_groups(table_uri):
+    with lance_nd.create(table_uri, group_variables=True, group_memory_bytes=1) as writer:
+        for title in "abc":
+            writer.write(dataset(title))
+    with lance_nd.append(table_uri, group_variables=True) as writer:
+        writer.write([dataset("d"), dataset("e")])
+    table = lance_nd.open(table_uri)
+    assert table.num_fragments == 4
+    assert table.count_rows() == 5
+
+
 def test_delete(table_uri):
     with lance_nd.create(table_uri) as writer:
         writer.write([dataset(title) for title in "abc"])

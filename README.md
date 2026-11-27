@@ -144,3 +144,10 @@ For a table with many variables, where each row has only some of them, use
 the cluster mode of compaction (`CompactOptions::cluster`). It merges
 fragments with similar variables from anywhere in the table, so fragments
 stay narrow and compaction stays fast. It does not keep the row order.
+
+A writer can do the same at write time with `WriteOptions::group_variables`
+(`group_variables=True` in Python). It buffers each group of rows with
+similar variables apart, and writes a group when it reaches
+`target_fragment_bytes`. `group_memory_bytes` (default 1 GiB) limits the
+memory of all groups. Above it, the writer writes its largest group. The
+table then does not keep the row order.

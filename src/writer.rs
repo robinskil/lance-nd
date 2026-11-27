@@ -41,8 +41,11 @@ use crate::write::{
 /// a write holds about twice the target in memory. Up to [`WriteOptions::write_parallelism`] tasks run at the
 /// same time. Readers do not see the fragments.
 /// [`NdWriter::finish`] writes the rest and commits all of them in one new
-/// table version, in the order of the rows. The writer must run on a Tokio
-/// runtime.
+/// table version, in the order of the rows. With
+/// [`WriteOptions::group_variables`], the writer buffers each group of rows
+/// with similar variables apart, so the fragments are full size and narrow,
+/// but the table does not keep the row order. The writer must run on a
+/// Tokio runtime.
 ///
 /// An append writer adds new fields to the table before it writes the first
 /// fragment with them, so readers can see new empty columns before
@@ -73,9 +76,9 @@ pub struct NdWriter {
     schema: Option<(Schema, LanceSchema)>,
     /// The position of each top-level field of `schema`, by name.
     index: HashMap<String, usize>,
-    /// Rows for the next fragment, and their size in memory.
-    buffer: Vec<RecordBatch>,
-    buffered_bytes: usize,
+    /// Rows for the next fragment writes: one buffer, or one per variable
+    /// group with [`WriteOptions::group_variables`].
+    buffers: Vec<Buffer>,
     /// Fragment writes that run, in the order of their rows.
     pending: VecDeque<JoinHandle<Result<Vec<Fragment>>>>,
     fragments: Vec<Fragment>,
@@ -115,8 +118,7 @@ impl NdWriter {
             options: options.clone(),
             schema: None,
             index: HashMap::new(),
-            buffer: Vec::new(),
-            buffered_bytes: 0,
+            buffers: Vec::new(),
             pending: VecDeque::new(),
             fragments: Vec::new(),
             failed: None,
@@ -146,8 +148,7 @@ impl NdWriter {
             options: options.clone(),
             schema: Some(schema),
             index,
-            buffer: Vec::new(),
-            buffered_bytes: 0,
+            buffers: Vec::new(),
             pending: VecDeque::new(),
             fragments: Vec::new(),
             failed: None,
@@ -290,7 +291,7 @@ impl NdWriter {
                 self.detached = true;
             }
             let staged =
-                !(self.buffer.is_empty() && self.pending.is_empty() && self.fragments.is_empty());
+                !(self.buffers.is_empty() && self.pending.is_empty() && self.fragments.is_empty());
             if staged || self.base.is_none() {
                 self.commit().await?;
             }
@@ -314,14 +315,48 @@ impl NdWriter {
     async fn push(&mut self, batches: Vec<RecordBatch>) -> Result<()> {
         self.grow(&batches)?;
         for batch in batches {
-            self.buffered_bytes += memory_sum(&batch) as usize;
-            self.buffer.push(batch);
-            if self.buffered_bytes >= self.options.target_fragment_bytes {
-                let result = self.flush().boxed().await;
+            let bytes = memory_sum(&batch) as usize;
+            let index = self.buffer_for(&batch);
+            let buffer = &mut self.buffers[index];
+            buffer.push(batch, bytes);
+            if buffer.bytes >= self.options.target_fragment_bytes {
+                let result = self.flush(index).boxed().await;
+                self.fail_on(result)?;
+            }
+            // Too many rows in all groups: write the largest group.
+            while self.options.group_variables
+                && self
+                    .buffers
+                    .iter()
+                    .map(|buffer| buffer.bytes)
+                    .sum::<usize>()
+                    > self.options.group_memory_bytes
+            {
+                let largest = (0..self.buffers.len())
+                    .max_by_key(|&index| self.buffers[index].bytes)
+                    .expect("a buffer");
+                let result = self.flush(largest).boxed().await;
                 self.fail_on(result)?;
             }
         }
         Ok(())
+    }
+
+    /// The index of the buffer for `batch`. With variable groups, this is
+    /// the group that `batch` adds the fewest new columns to, or a new group.
+    fn buffer_for(&mut self, batch: &RecordBatch) -> usize {
+        let fitting = if self.options.group_variables {
+            (0..self.buffers.len())
+                .filter_map(|index| Some((self.buffers[index].new_columns(batch)?, index)))
+                .min()
+                .map(|(_, index)| index)
+        } else {
+            self.buffers.len().checked_sub(1)
+        };
+        fitting.unwrap_or_else(|| {
+            self.buffers.push(Buffer::default());
+            self.buffers.len() - 1
+        })
     }
 
     /// Add the fields of `batches` that the staged schema lacks. The time is
@@ -405,16 +440,12 @@ impl NdWriter {
         Ok(())
     }
 
-    /// Start a fragment write of the buffer. Wait for the oldest write when
-    /// too many run.
-    #[tracing::instrument(level = "debug", skip_all, fields(rows = self.buffer.len(), bytes = self.buffered_bytes))]
-    async fn flush(&mut self) -> Result<()> {
-        if self.buffer.is_empty() {
-            return Ok(());
-        }
+    /// Start a fragment write of the buffer at `index`, and remove it. Wait
+    /// for the oldest write when too many run.
+    #[tracing::instrument(level = "debug", skip_all, fields(rows = self.buffers[index].batches.len(), bytes = self.buffers[index].bytes))]
+    async fn flush(&mut self, index: usize) -> Result<()> {
         self.evolve().await?;
-        let batches = std::mem::take(&mut self.buffer);
-        self.buffered_bytes = 0;
+        let batches = self.buffers.remove(index).batches;
         // One fragment per cluster of similar rows, each with only the
         // columns of its rows: the other columns read as null.
         let mut writes = Vec::new();
@@ -559,7 +590,9 @@ impl NdWriter {
     /// Commit the staged rows. The writer then appends to the new version.
     #[tracing::instrument(level = "debug", skip_all, fields(uri = %self.uri))]
     async fn commit(&mut self) -> Result<Dataset> {
-        self.flush().boxed().await?;
+        while !self.buffers.is_empty() {
+            self.flush(0).boxed().await?;
+        }
         while !self.pending.is_empty() {
             self.wait_oldest().await?;
         }
@@ -666,6 +699,48 @@ const CLUSTER_WIDTH: usize = 4;
 /// The columns that a fragment can always hold, also with narrow batches.
 const CLUSTER_MIN_COLUMNS: usize = 64;
 
+/// The most columns of a fragment whose widest batch has `widest` columns.
+fn cluster_limit(widest: usize) -> usize {
+    (CLUSTER_WIDTH * widest).max(CLUSTER_MIN_COLUMNS)
+}
+
+/// Rows for one fragment write, with the union of their columns.
+#[derive(Default)]
+struct Buffer {
+    batches: Vec<RecordBatch>,
+    /// The size in memory of `batches`.
+    bytes: usize,
+    names: HashSet<String>,
+    widest: usize,
+}
+
+impl Buffer {
+    /// The columns of `batch` that the buffer lacks, or `None` when the
+    /// union then passes [`cluster_limit`].
+    fn new_columns(&self, batch: &RecordBatch) -> Option<usize> {
+        let schema = batch.schema();
+        let new = schema
+            .fields()
+            .iter()
+            .filter(|field| !self.names.contains(field.name()))
+            .count();
+        let limit = cluster_limit(self.widest.max(batch.num_columns()));
+        (self.names.len() + new <= limit).then_some(new)
+    }
+
+    fn push(&mut self, batch: RecordBatch, bytes: usize) {
+        let schema = batch.schema();
+        for field in schema.fields() {
+            if !self.names.contains(field.name()) {
+                self.names.insert(field.name().clone());
+            }
+        }
+        self.widest = self.widest.max(batch.num_columns());
+        self.bytes += bytes;
+        self.batches.push(batch);
+    }
+}
+
 /// `batches` split into runs of consecutive batches whose union of columns
 /// stays at most [`CLUSTER_WIDTH`] times their widest batch, in order.
 fn clusters(batches: Vec<RecordBatch>) -> Vec<Vec<RecordBatch>> {
@@ -679,7 +754,7 @@ fn clusters(batches: Vec<RecordBatch>) -> Vec<Vec<RecordBatch>> {
             .iter()
             .filter(|field| !names.contains(field.name()))
             .count();
-        let limit = (CLUSTER_WIDTH * widest.max(batch.num_columns())).max(CLUSTER_MIN_COLUMNS);
+        let limit = cluster_limit(widest.max(batch.num_columns()));
         if clusters.is_empty() || names.len() + new > limit {
             clusters.push(Vec::new());
             names.clear();

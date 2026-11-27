@@ -893,3 +893,91 @@ async fn a_dropped_writer_stops_its_writes_and_commits_nothing() {
     assert_eq!(dataset.version().version, before.version().version);
     assert_eq!(dataset.count_rows(None).await.unwrap(), 1);
 }
+
+/// A row of variable set `set`: 20 Float64 variables `s<set>_<k>`, each
+/// with the value `i`.
+fn set_row(set: usize, i: usize) -> NdRecordBatch {
+    let names: Vec<String> = (0..20).map(|k| format!("s{set}_{k}")).collect();
+    let schema = Arc::new(Schema::new(
+        names
+            .iter()
+            .map(|name| Field::new(name, DataType::Float64, true))
+            .collect::<Vec<_>>(),
+    ));
+    let arrays = names
+        .iter()
+        .map(|_| {
+            NdArrowArray::try_new(
+                Arc::new(Float64Array::from(vec![i as f64])),
+                Dimensions::try_new([("n", 1)]).unwrap(),
+            )
+            .unwrap()
+        })
+        .collect();
+    NdRecordBatch::try_new_inferred(schema, arrays).unwrap()
+}
+
+/// 80 rows that cycle over 8 disjoint sets of 20 variables.
+fn cycled_rows() -> Vec<NdRecordBatch> {
+    (0..80).map(|i| set_row(i % 8, i)).collect()
+}
+
+fn grouped() -> WriteOptions {
+    WriteOptions {
+        group_variables: true,
+        ..Default::default()
+    }
+}
+
+#[tokio::test]
+async fn variable_groups_make_few_narrow_fragments() {
+    let dir = tempfile::tempdir().unwrap();
+    let dataset = write_one_by_one(&uri(&dir), cycled_rows(), &grouped()).await;
+    // A group holds at most 4 sets: 4 times the columns of a row.
+    let fragments = dataset.get_fragments();
+    assert_eq!(fragments.len(), 2);
+    let all = dataset.schema().fields_pre_order().count();
+    for fragment in &fragments {
+        assert_eq!(fragment.metadata().physical_rows, Some(40));
+        // Each fragment holds the columns of its 4 sets only.
+        let fields: usize = fragment
+            .metadata()
+            .files
+            .iter()
+            .map(|file| file.fields.len())
+            .sum();
+        assert!(fields < all * 3 / 4, "{fields} of {all} fields");
+    }
+    let mut values: Vec<(String, usize)> = read_all(&dataset)
+        .await
+        .iter()
+        .map(|row| {
+            let name = row.schema().field(0).name().clone();
+            (name, row.num_columns())
+        })
+        .collect();
+    values.sort();
+    let mut expected: Vec<(String, usize)> =
+        (0..80).map(|i| (format!("s{}_0", i % 8), 20)).collect();
+    expected.sort();
+    assert_eq!(values, expected);
+}
+
+#[tokio::test]
+async fn without_variable_groups_runs_split_the_fragments() {
+    let dir = tempfile::tempdir().unwrap();
+    let dataset = write_one_by_one(&uri(&dir), cycled_rows(), &WriteOptions::default()).await;
+    assert_eq!(dataset.get_fragments().len(), 20);
+}
+
+#[tokio::test]
+async fn variable_groups_write_the_largest_group_above_the_limit() {
+    let dir = tempfile::tempdir().unwrap();
+    let options = WriteOptions {
+        group_memory_bytes: 1,
+        ..grouped()
+    };
+    let dataset = write_one_by_one(&uri(&dir), cycled_rows(), &options).await;
+    assert_eq!(dataset.get_fragments().len(), 80);
+    assert_eq!(dataset.count_rows(None).await.unwrap(), 80);
+}

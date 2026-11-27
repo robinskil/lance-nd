@@ -125,6 +125,8 @@ impl Writer {
         casting = "no",
         storage_options = None,
         defer_promotion = false,
+        group_variables = false,
+        group_memory_bytes = None,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn create(
@@ -139,6 +141,8 @@ impl Writer {
         casting: &str,
         storage_options: Option<HashMap<String, String>>,
         defer_promotion: bool,
+        group_variables: bool,
+        group_memory_bytes: Option<usize>,
     ) -> PyResult<Self> {
         let mode = match mode {
             "create" => WriteMode::Create,
@@ -158,6 +162,9 @@ impl Writer {
                 casting: parse_casting(casting)?,
                 defer_promotion,
                 storage_options: storage_options.unwrap_or_default(),
+                group_variables,
+                group_memory_bytes: group_memory_bytes
+                    .unwrap_or(WriteOptions::default().group_memory_bytes),
                 ..Default::default()
             },
             target_fragment_bytes,
@@ -180,6 +187,8 @@ impl Writer {
         casting = "no",
         storage_options = None,
         defer_promotion = false,
+        group_variables = false,
+        group_memory_bytes = None,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn append(
@@ -191,6 +200,8 @@ impl Writer {
         casting: &str,
         storage_options: Option<HashMap<String, String>>,
         defer_promotion: bool,
+        group_variables: bool,
+        group_memory_bytes: Option<usize>,
     ) -> PyResult<Self> {
         let options = fragment_options(
             WriteOptions {
@@ -198,6 +209,9 @@ impl Writer {
                 casting: parse_casting(casting)?,
                 defer_promotion,
                 storage_options: storage_options.unwrap_or_default(),
+                group_variables,
+                group_memory_bytes: group_memory_bytes
+                    .unwrap_or(WriteOptions::default().group_memory_bytes),
                 ..Default::default()
             },
             target_fragment_bytes,

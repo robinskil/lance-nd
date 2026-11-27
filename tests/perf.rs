@@ -5,8 +5,8 @@
 //! `cargo test --release --test perf -- --ignored --nocapture --test-threads 1`
 //!
 //! Set `LANCE_ND_WIDTHS` (for example `250,1000,4000`), `LANCE_ND_NEW_FIELDS`,
-//! `LANCE_ND_FILES`, `LANCE_ND_VARIABLES`, `LANCE_ND_PER_FILE`, `LANCE_ND_GRID`
-//! and `LANCE_ND_TARGET_MB` to change the sizes.
+//! `LANCE_ND_FILES`, `LANCE_ND_VARIABLES`, `LANCE_ND_PER_FILE`, `LANCE_ND_GRID`,
+//! `LANCE_ND_TARGET_MB` and `LANCE_ND_KINDS` to change the sizes.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -376,4 +376,104 @@ async fn writer_memory_against_files() {
 #[ignore = "performance check, run in release mode with --ignored"]
 async fn writer_memory_with_small_fragments() {
     memory_run(8).await;
+}
+
+/// The variables of file `index`. With `kinds` above 0, each file is one of
+/// `kinds` kinds in a mixed order, and a kind has its own `per_file`
+/// variables. Else each file has its own mix of the `variables`.
+fn file_ids(index: usize, kinds: usize, per_file: usize, variables: usize) -> Vec<usize> {
+    let ids: std::collections::BTreeSet<usize> = if kinds > 0 {
+        let kind = (index.wrapping_mul(2_654_435_761) >> 7) % kinds;
+        (0..per_file)
+            .map(|j| (kind * per_file + j) % variables)
+            .collect()
+    } else {
+        (0..per_file)
+            .map(|j| (index * per_file + j * 7919) % variables)
+            .collect()
+    };
+    ids.into_iter().collect()
+}
+
+/// Write `files` files one by one, then compact in `cluster` mode or not.
+/// Gives the write time, the fragments, the compaction time, the fragments
+/// after it, and the time of a read of the variables of the first file.
+async fn grouped_run(group: bool, cluster: bool, kinds: usize) -> [f64; 5] {
+    let files = env("LANCE_ND_FILES", 3000);
+    let per_file = env("LANCE_ND_PER_FILE", 20);
+    let variables = env("LANCE_ND_VARIABLES", 2000);
+    let grid = env("LANCE_ND_GRID", 16);
+    let dir = tempfile::tempdir().unwrap();
+    let uri = dir.path().join("t.lance");
+    let options = WriteOptions {
+        target_fragment_bytes: env("LANCE_ND_TARGET_MB", 8) << 20,
+        group_variables: group,
+        ..Default::default()
+    };
+    let start = Instant::now();
+    let mut writer = NdWriter::create(uri.to_str().unwrap(), &options)
+        .await
+        .unwrap();
+    for index in 0..files {
+        let ids = file_ids(index, kinds, per_file, variables);
+        writer
+            .write(stream::iter([Ok(row(&ids, grid, false, index))]))
+            .await
+            .unwrap();
+    }
+    let mut dataset = writer.finish().await.unwrap();
+    let write = secs(start.elapsed());
+    let written = dataset.get_fragments().len();
+    let compact_options = lance_nd::CompactOptions {
+        target_fragment_bytes: options.target_fragment_bytes as u64,
+        cluster,
+        ..Default::default()
+    };
+    let start = Instant::now();
+    lance_nd::compact(&mut dataset, &compact_options)
+        .await
+        .unwrap();
+    let compact = secs(start.elapsed());
+    let compacted = dataset.get_fragments().len();
+    let own: Vec<String> = file_ids(0, kinds, per_file, variables)
+        .into_iter()
+        .map(name)
+        .collect();
+    let own: Vec<&str> = own.iter().map(String::as_str).collect();
+    let start = Instant::now();
+    let rows: Vec<NdRecordBatch> = lance_nd::scan(&dataset)
+        .project(&own)
+        .try_collect()
+        .await
+        .unwrap();
+    assert!(!rows.is_empty());
+    let read = secs(start.elapsed());
+    [write, written as f64, compact, compacted as f64, read]
+}
+
+/// Compare plain writes with variable groups, then each compaction mode.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "performance check, run in release mode with --ignored"]
+async fn grouped_write_and_compact() {
+    let kinds = env("LANCE_ND_KINDS", 50);
+    for kinds in [kinds, 0] {
+        match kinds {
+            0 => println!("files with their own mix of variables"),
+            _ => println!("files of {kinds} kinds in a mixed order"),
+        }
+        println!(
+            "{:>8} {:>8} {:>9} {:>6} {:>10} {:>6} {:>8}",
+            "groups", "compact", "write s", "frags", "compact s", "frags", "read s"
+        );
+        for group in [false, true] {
+            for cluster in [false, true] {
+                let [write, written, compact, compacted, read] =
+                    grouped_run(group, cluster, kinds).await;
+                let mode = if cluster { "cluster" } else { "ordered" };
+                println!(
+                    "{group:>8} {mode:>8} {write:>9.2} {written:>6} {compact:>10.2} {compacted:>6} {read:>8.3}"
+                );
+            }
+        }
+    }
 }

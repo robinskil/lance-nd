@@ -78,6 +78,15 @@ pub struct WriteOptions {
     pub target_fragment_bytes: usize,
     /// The most fragments that [`crate::NdWriter`] writes at the same time.
     pub write_parallelism: usize,
+    /// [`crate::NdWriter`] buffers each group of rows with similar variables
+    /// apart, and writes a group when it reaches `target_fragment_bytes`.
+    /// The fragments are then full size and narrow, also when the rows of
+    /// the groups alternate. The table does not keep the row order.
+    pub group_variables: bool,
+    /// The most bytes in memory of the rows in all buffers. Above it,
+    /// [`crate::NdWriter`] writes its largest group. Keep it well above
+    /// `target_fragment_bytes`, else the groups are written small.
+    pub group_memory_bytes: usize,
     /// Lance storage options, for example the credentials of an object
     /// store, see [`crate::StorageOptions`]. [`append()`] uses the options of its
     /// table when this is empty.
@@ -97,6 +106,8 @@ impl Default for WriteOptions {
             defer_promotion: false,
             target_fragment_bytes: 128 << 20,
             write_parallelism: 4,
+            group_variables: false,
+            group_memory_bytes: 1 << 30,
             storage_options: StorageOptions::new(),
         }
     }

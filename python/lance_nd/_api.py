@@ -195,6 +195,8 @@ def create(
     casting: Casting = "no",
     storage_options: dict[str, str] | None = None,
     defer_promotion: bool = False,
+    group_variables: bool = False,
+    group_memory_bytes: int | None = None,
 ) -> Writer:
     """A writer for a new table. ``mode`` is "create" or "overwrite".
 
@@ -227,6 +229,13 @@ def create(
     (default 128 MiB) in memory, then writes them as Lance fragments, each
     from one batch. A write holds about twice this size in memory.
     ``write_parallelism`` (default 4) fragments are written at the same time.
+
+    ``group_variables`` buffers each group of datasets with similar
+    variables apart, and writes a group when it reaches the target. The
+    fragments are then full size and narrow, also when the groups alternate.
+    The table does not keep the order of the datasets. ``group_memory_bytes``
+    (default 1 GiB) limits the memory of all groups. Above it, the writer
+    writes its largest group.
     """
     native = _lance_nd.Writer.create(
         uri,
@@ -239,6 +248,8 @@ def create(
         casting,
         storage_options,
         defer_promotion,
+        group_variables,
+        group_memory_bytes,
     )
     if defer_promotion:
         warnings.warn(_DEFER_WARNING, stacklevel=2)
@@ -253,10 +264,12 @@ def append(
     casting: Casting = "no",
     storage_options: dict[str, str] | None = None,
     defer_promotion: bool = False,
+    group_variables: bool = False,
+    group_memory_bytes: int | None = None,
 ) -> Writer:
     """A writer that appends to an existing table. See :func:`create` for
-    the fragment options, ``casting``, ``storage_options`` and
-    ``defer_promotion``."""
+    the fragment options, ``casting``, ``storage_options``,
+    ``defer_promotion`` and the variable groups."""
     native = _lance_nd.Writer.append(
         uri,
         column_options,
@@ -265,6 +278,8 @@ def append(
         casting,
         storage_options,
         defer_promotion,
+        group_variables,
+        group_memory_bytes,
     )
     if defer_promotion:
         warnings.warn(_DEFER_WARNING, stacklevel=2)

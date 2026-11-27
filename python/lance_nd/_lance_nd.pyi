@@ -41,6 +41,8 @@ class Writer:
         casting: Casting = "no",
         storage_options: dict[str, str] | None = None,
         defer_promotion: bool = False,
+        group_variables: bool = False,
+        group_memory_bytes: int | None = None,
     ) -> Writer:
         """A writer for a new table. ``mode`` is "create" or "overwrite".
 
@@ -50,6 +52,11 @@ class Writer:
         ``casting`` is "no", "safe", "same_kind" or "promote", and
         ``defer_promotion`` delays its widenings to ``finish()``, see
         ``lance_nd.create``.
+
+        ``group_variables`` buffers each group of datasets with similar
+        variables apart, so the fragments are full size and narrow. The
+        table then does not keep the row order. ``group_memory_bytes``
+        (default 1 GiB) limits the memory of all groups.
         """
 
     @staticmethod
@@ -61,8 +68,10 @@ class Writer:
         casting: Casting = "no",
         storage_options: dict[str, str] | None = None,
         defer_promotion: bool = False,
+        group_variables: bool = False,
+        group_memory_bytes: int | None = None,
     ) -> Writer:
-        """A writer that appends to an existing table."""
+        """A writer that appends to an existing table, see ``create``."""
 
     def write(self, data: ArrowData) -> None:
         """Write Arrow data in the nd-arrow format, one dataset per row, without a commit."""
